@@ -4,34 +4,57 @@ import numpy as np
 import os
 from PIL import Image
 import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.manifold import TSNE
-from scipy.stats import ks_2samp
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from baseline import ArtAestheticBaseline, LapisArtDataset
+from baseline import LandscapeBaseline 
+from scipy.stats import ks_2samp
+from sklearn.metrics import pairwise_distances
 
-ANNOTATION_DIR = "/home/katerina/codes/datasets/LAPIS/LAPIS github/annotation"
-IMAGE_DIR = "/home/katerina/codes/datasets/LAPIS/LAPIS github/images"
-MODEL_PATH = "baseline_renaissance.pth"
+CUSTOM_DATA_ROOT = "/home/kate/datasets/ARXPHOTOS314/images"
+MODEL_PATH = "baseline_landscape.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-RENAISSANCE_STYLES = [ 'Early_Renaissance', 'High_Renaissance', 'Northern_Renaissance', 'Mannerism_Late_Renaissance']
+CLASS_MAP = {
+    'Beach Landscape': 0,      # coast
+    'Desert Landscape': 1,     # desert
+    'Forest Landscape': 2,     # forest
+    'Ice & Snow Landscape': 3, # glacier
+    'Mountain Landscape': 4    # mountain
+}
 
-DRIFT_STYLES = ['Pop_Art', 'Abstract_Expressionism']
+class CustomLandscapeEvalDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.samples = []
+        self.transform = transform
+        
+        for folder_name, label_idx in CLASS_MAP.items():
+            main_path = os.path.join(root_dir, folder_name)
+            if not os.path.exists(main_path): continue
+            
+            for sub_folder in os.listdir(main_path):
+                sub_path = os.path.join(main_path, sub_folder)
+                if os.path.isdir(sub_path):
+                    for img_name in os.listdir(sub_path):
+                        if img_name.lower().endswith(('png')):
+                            self.samples.append({
+                                'path': os.path.join(sub_path, img_name),
+                                'label': label_idx,
+                                'sub_category': sub_folder
+                            })
 
-def evaluate_official_drift():
-    model = ArtAestheticBaseline().to(DEVICE)
+    def __len__(self): return len(self.samples)
+    def __getitem__(self, idx):
+        s = self.samples[idx]
+        img = Image.open(s['path']).convert('RGB')
+        if self.transform: img = self.transform(img)
+        return img, s['label'], s['sub_category']
+
+def evaluate_landscape_drift():
+    model = LandscapeBaseline().to(DEVICE)
     model.load_state_dict(torch.load(MODEL_PATH))
     model.eval()
-
-    test_csv_path = os.path.join(ANNOTATION_DIR, "LAPIS_GIAA_Testsplit.csv")
-    test_df = pd.read_csv(test_csv_path)
-
-    df_id = test_df[test_df['style'].isin(RENAISSANCE_STYLES)]
-    df_ood = test_df[test_df['style'].isin(DRIFT_STYLES)]
-
-    print(f"ID Samples (Renaissance): {len(df_id)}")
-    print(f"OOD Samples (Drift): {len(df_ood)}")
 
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -39,80 +62,117 @@ def evaluate_official_drift():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    class GIAADataset(LapisArtDataset):
-        def __getitem__(self, idx):
-            img_filename = self.data.iloc[idx]['image_filename']
-            img_path = os.path.join(self.img_dir, img_filename)
-            image = Image.open(img_path).convert('RGB')
-            label = torch.tensor(self.data.iloc[idx]['mean_response'] / 100.0, dtype=torch.float32)
-            if self.transform: image = self.transform(image)
-            return image, label
+    custom_ds = CustomLandscapeEvalDataset(CUSTOM_DATA_ROOT, transform)
+    loader = DataLoader(custom_ds, batch_size=32, shuffle=False)
 
-    loader_id = DataLoader(GIAADataset(df_id, IMAGE_DIR, transform), batch_size=20)
-    loader_ood = DataLoader(GIAADataset(df_ood, IMAGE_DIR, transform), batch_size=20)
+    all_features, all_preds, all_labels, all_subs = [], [], [], []
 
-    def get_results(loader):
-        preds, labels, features = [], [], []
-        with torch.no_grad():
-            for imgs, target in loader:
-                imgs = imgs.to(DEVICE)
-                # Feature extraction
-                feat = model.backbone.avgpool(model.backbone.layer4(model.backbone.layer3(
-                    model.backbone.layer2(model.backbone.layer1(model.backbone.maxpool(
-                    model.backbone.relu(model.backbone.bn1(model.backbone.conv1(imgs))))))))).flatten(1)
-                
-                output = model(imgs).squeeze()
-                preds.extend(output.cpu().numpy())
-                labels.extend(target.numpy())
-                features.append(feat.cpu().numpy())
-        return np.array(preds), np.array(labels), np.concatenate(features)
+    print(f"Evaluating drift on {len(custom_ds)} custom samples...")
+    with torch.no_grad():
+        for imgs, labels, subs in loader:
+            imgs = imgs.to(DEVICE)
+            # Feature extraction (Last layer before classifier)
+            # feat = model.backbone.avgpool(model.backbone.layer4(imgs)).flatten(1)
+            feat = model.backbone(imgs) 
+            feat = torch.flatten(feat, 1)
+            outputs = model(imgs)
+            _, preds = torch.max(outputs, 1)
+            
+            all_features.append(feat.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.numpy())
+            all_subs.extend(subs)
 
-    p_id, l_id, f_id = get_results(loader_id)
-    p_ood, l_ood, f_ood = get_results(loader_ood)
-
-    # 4. Analysis
-    mse_id = np.mean((p_id - l_id)**2)
-    mse_ood = np.mean((p_ood - l_ood)**2)
-
-    print(f"\n--- Results ---")
-    print(f"Renaissance (ID) MSE: {mse_id:.4f}")
-    print(f"Drift (OOD) MSE: {mse_ood:.4f}")
+    features = np.concatenate(all_features)
     
-    # Statistical Drift Test (Data Drift)
-    stat, p_val = ks_2samp(f_id.mean(axis=1), f_ood.mean(axis=1))
-    print(f"Data Drift P-value: {p_val:.4e}")
-
-    # Plotting
-    plot_tsne(f_id, f_ood)
+    # --- DATA DRIFT CALCULATION ---
+    # We compare the feature distribution of different sub-categories
+    # against the overall average to see which is most "Alien"
     
-    plot_error_distribution(l_id,p_id,l_ood, p_ood)
-def plot_tsne(f_id, f_ood):
-    tsne = TSNE(n_components=2, random_state=42)
-    reduced = tsne.fit_transform(np.vstack([f_id, f_ood]))
-    plt.figure(figsize=(10,6))
-    plt.scatter(reduced[:len(f_id),0], reduced[:len(f_id),1], label='Renaissance (ID)', alpha=0.5)
-    plt.scatter(reduced[len(f_id):,0], reduced[len(f_id):,1], label='Pop/Abstract (Drift)', alpha=0.5)
-    plt.legend()
-    plt.title("Drift Visualization: Renaissance vs. Modern Styles")
-    plt.savefig("drift_visualization.png")
-    print("Plot saved as drift_visualization.png")
-import seaborn as sns
-import matplotlib.pyplot as plt
+    baseline_centroid = np.mean(features, axis=0) # Average feature vector
+    
+    results_list = []
+    for i in range(len(features)):
+        # Distance from the "Average" representation (Geometric Data Drift)
+        dist = np.linalg.norm(features[i] - baseline_centroid)
+        
+        results_list.append({
+            'label': all_labels[i],
+            'pred': all_preds[i],
+            'sub_category': all_subs[i],
+            'pixel_drift_score': dist # Higher = More Data Drift
+        })
 
-def plot_error_distribution(l_id, p_id, l_ood, p_ood):
-    error_id = np.abs(l_id - p_id)
-    error_ood = np.abs(l_ood - p_ood)
+    results_df = pd.DataFrame(results_list)
+    results_df['correct'] = results_df['label'] == results_df['pred']
 
+    # --- THE DRIFT REPORT ---
+    # Grouping to see the relationship between Data Drift and Concept Drift
+    drift_report = results_df.groupby('sub_category').agg({
+        'pixel_drift_score': 'mean', # DATA DRIFT
+        'correct': 'mean'            # CONCEPT DRIFT (Accuracy)
+    }).sort_values(by='pixel_drift_score', ascending=False)
+
+    print("\n--- DRIFT ANALYSIS BY SUB-CATEGORY ---")
+    print(drift_report)
+    # Identify Pure Concept Drift (Low Visual Change, High Error)
+    # We look for categories with Drift below the median but Accuracy below a threshold
+    median_drift = drift_report['pixel_drift_score'].median()
+
+    pure_concept_drift = drift_report[
+        (drift_report['pixel_drift_score'] <= median_drift) & 
+        (drift_report['correct'] < 0.70)
+    ]
+
+    print("\n--- PURE CONCEPT DRIFT DETECTED ---")
+    if not pure_concept_drift.empty:
+        print(pure_concept_drift)
+    else:
+        print("No pure concept drift found. All errors are linked to visual changes.")
+    # 2. Statistical Data Drift (KS-Test)
+    # Comparing two sub-categories directly (e.g., Jungle vs. Olive Tree)
+    # A low p-value confirms the two sets of pixels are from different distributions
+    sample_a = results_df[results_df['sub_category'] == results_df['sub_category'].iloc[0]]['pixel_drift_score']
+    sample_b = results_df[results_df['sub_category'] == results_df['sub_category'].iloc[-1]]['pixel_drift_score']
+    stat, p_val = ks_2samp(sample_a, sample_b)
+    print(f"\nStatistical Data Drift (KS-Test) P-Value: {p_val:.4e}")
+
+    # 3. Visualizations
+    plot_drift_relationship(drift_report)
+    plot_landscape_tsne(features, all_labels, all_subs)
+
+def plot_drift_relationship(report):
     plt.figure(figsize=(10, 6))
-    sns.kdeplot(error_id, fill=True, label="Renaissance (ID) Error", color="blue")
-    sns.kdeplot(error_ood, fill=True, label="Pop Art (OOD) Error", color="red")
-    plt.title("Concept Drift: Distribution of Absolute Prediction Errors")
-    plt.xlabel("Absolute Error (Normalized)")
-    plt.ylabel("Density")
-    plt.legend()
-    plt.savefig("error_distribution.png")
-    print("Error distribution plot saved!")
+    sns.scatterplot(data=report, x='pixel_drift_score', y='correct', hue='sub_category', s=100)
+    plt.title("Data Drift (Pixels) vs. Concept Drift (Accuracy)")
+    plt.xlabel("Data Drift Score (Distance from Baseline)")
+    plt.ylabel("Accuracy (Concept Stability)")
+    plt.grid(True, alpha=0.3)
+    plt.savefig("drift_relationship_scatter.png")
+    print("Drift relationship plot saved.")
 
-
+def plot_landscape_tsne(features, labels, subs):
+    print("Computing t-SNE... this may take a minute.")
+    tsne = TSNE(n_components=2, random_state=42, init='pca', learning_rate='auto')
+    reduced = tsne.fit_transform(features)
+    
+    plt.figure(figsize=(14, 10))
+    # Using a professional palette for the 5 main categories
+    scatter = sns.scatterplot(
+        x=reduced[:,0], 
+        y=reduced[:,1], 
+        hue=[list(CLASS_MAP.keys())[l] for l in labels], 
+        style=[list(CLASS_MAP.keys())[l] for l in labels],
+        palette='deep', 
+        alpha=0.7,
+        s=60
+    )
+    
+    plt.title("Latent Space Data Drift: Custom Landscapes vs. Baseline Concepts", fontsize=15)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', title="Main Categories")
+    plt.tight_layout()
+    plt.savefig("landscape_drift_tsne.png")
+    print("TSNE plot saved as landscape_drift_tsne.png")
+    
 if __name__ == "__main__":
-    evaluate_official_drift()
+    evaluate_landscape_drift()
