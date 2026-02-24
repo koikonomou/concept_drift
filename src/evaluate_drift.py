@@ -71,8 +71,7 @@ def evaluate_landscape_drift():
     with torch.no_grad():
         for imgs, labels, subs in loader:
             imgs = imgs.to(DEVICE)
-            # Feature extraction (Last layer before classifier)
-            # feat = model.backbone.avgpool(model.backbone.layer4(imgs)).flatten(1)
+
             feat = model.backbone(imgs) 
             feat = torch.flatten(feat, 1)
             outputs = model(imgs)
@@ -86,14 +85,10 @@ def evaluate_landscape_drift():
     features = np.concatenate(all_features)
     
     # --- DATA DRIFT CALCULATION ---
-    # We compare the feature distribution of different sub-categories
-    # against the overall average to see which is most "Alien"
-    
-    baseline_centroid = np.mean(features, axis=0) # Average feature vector
+    baseline_centroid = np.mean(features, axis=0)
     
     results_list = []
     for i in range(len(features)):
-        # Distance from the "Average" representation (Geometric Data Drift)
         dist = np.linalg.norm(features[i] - baseline_centroid)
         
         results_list.append({
@@ -106,7 +101,6 @@ def evaluate_landscape_drift():
     results_df = pd.DataFrame(results_list)
     results_df['correct'] = results_df['label'] == results_df['pred']
 
-    # --- THE DRIFT REPORT ---
     # Grouping to see the relationship between Data Drift and Concept Drift
     drift_report = results_df.groupby('sub_category').agg({
         'pixel_drift_score': 'mean', # DATA DRIFT
@@ -129,7 +123,7 @@ def evaluate_landscape_drift():
         print(pure_concept_drift)
     else:
         print("No pure concept drift found. All errors are linked to visual changes.")
-    # 2. Statistical Data Drift (KS-Test)
+    #Statistical Data Drift (KS-Test)
     # Comparing two sub-categories directly (e.g., Jungle vs. Olive Tree)
     # A low p-value confirms the two sets of pixels are from different distributions
     sample_a = results_df[results_df['sub_category'] == results_df['sub_category'].iloc[0]]['pixel_drift_score']
@@ -137,19 +131,7 @@ def evaluate_landscape_drift():
     stat, p_val = ks_2samp(sample_a, sample_b)
     print(f"\nStatistical Data Drift (KS-Test) P-Value: {p_val:.4e}")
 
-    # 3. Visualizations
-    plot_drift_relationship(drift_report)
     plot_landscape_tsne(features, all_labels, all_subs)
-
-def plot_drift_relationship(report):
-    plt.figure(figsize=(10, 6))
-    sns.scatterplot(data=report, x='pixel_drift_score', y='correct', hue='sub_category', s=100)
-    plt.title("Data Drift (Pixels) vs. Concept Drift (Accuracy)")
-    plt.xlabel("Data Drift Score (Distance from Baseline)")
-    plt.ylabel("Accuracy (Concept Stability)")
-    plt.grid(True, alpha=0.3)
-    plt.savefig("drift_relationship_scatter.png")
-    print("Drift relationship plot saved.")
 
 def plot_landscape_tsne(features, labels, subs):
     print("Computing t-SNE... this may take a minute.")
@@ -173,6 +155,6 @@ def plot_landscape_tsne(features, labels, subs):
     plt.tight_layout()
     plt.savefig("landscape_drift_tsne.png")
     print("TSNE plot saved as landscape_drift_tsne.png")
-    
+
 if __name__ == "__main__":
     evaluate_landscape_drift()
