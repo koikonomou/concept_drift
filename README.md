@@ -1,49 +1,76 @@
-# Landscape Monitoring: Data & Concept Drift Analysis
+# Drift Detection: Baseline vs HAS
 
-This project implements a pipeline to detect and distinguish between **Data Drift** (visual/pixel-level changes) and **Concept Drift** (semantic/label-level changes) in landscape classification models.
+## Project Structure
 
-## 📌 Research Objective
-The goal is to monitor how a model trained on a "Generic" landscape dataset performs when deployed on a "Custom" dataset containing specific sub-categories (e.g., "Olive Tree Forests" or "Ice Skating Rinks").
+```
+config.py              ← paths, hyperparams (edit this once)
+models.py              ← BaselineModel, HASModel, FolderDataset
+drift_stats.py         ← statistical tests (KS, MMD, chi², etc.)
 
+step1_train.py         ← train both models        → weights/
+step2_extract.py       ← extract 64-D features     → features/
+step3_detect.py        ← run drift tests           → results/*.csv + .txt
+step4_visualize.py     ← UMAP, dashboards, plots   → results/*.png
 
-## 📊 Datasets
+run_all.py             ← orchestrate all steps
+```
 
-### 1. Baseline Dataset (Source Domain)
-We use the [Landscape Recognition Image Dataset](https://www.kaggle.com/datasets/utkarshsaxenadn/landscape-recognition-image-dataset-12k-images) from Kaggle.
-- **Classes:** `Coast`, `Desert`, `Forest`, `Glacier`, `Mountain`.
-- **Purpose:** Used to train the ResNet50 baseline model and establish the "Standard" feature distribution for natural landscapes.
+## Quick Start
 
-### 2. Custom Dataset (Target Domain)
-A hierarchical dataset containing specific sub-categories:
-- **Forest Landscape:** Jungle, Olive Tree Cluster, Thick Treeline.
-- **Ice & Snow:** Icecap, Snowy Villages, **Ice Skating Rink** (Concept Drift trigger).
-- **Desert:** Oasis, Sand Dune, Rocky Hills.
+```bash
+# 1. Edit config.py with your dataset paths
 
----
+# 2. Full pipeline
+python run_all.py --epochs 10
 
-## 🚀 Methodology
+# 3. Or run steps individually
+python step1_train.py --epochs 10
+python step2_extract.py
+python step3_detect.py
+python step4_visualize.py
+```
 
-### 1. Baseline Training (`src/baseline.py`)
-Trains a ResNet50 classifier on the 5 baseline classes using Cross-Entropy Loss.
-- **Input:** 224x224 RGB images.
-- **Output:** 5-class probability vector.
+## Re-entering After a Failure
 
-### 2. Drift Evaluation (`src/evaluate_drift.py`)
-Calculates dual-drift metrics:
-- **Pixel Drift Score:** Measures the Euclidean distance in the latent space (ResNet feature layer) between custom images and the baseline average.
-- **Accuracy:** Measures the stability of the "Concept"
+Each step saves its outputs to disk. If step 3 crashes you don't
+need to retrain or re-extract:
 
+```bash
+python run_all.py --from-step 3
+# or directly:
+python step3_detect.py
+```
 
-## 🛠 Installation
+## Step Outputs
 
-### Requirements
-- Python 3.10+
-- PyTorch / Torchvision
-- Scikit-Learn (for t-SNE)
-- Seaborn / Matplotlib
-- Poetry (recommended)
+| Step | Writes | Reads |
+|------|--------|-------|
+| 1. Train | `weights/*.pth` | training images |
+| 2. Extract | `features/*.npz`, `features/meta.json` | weights + images |
+| 3. Detect | `results/*.csv`, `results/drift_report.txt` | features |
+| 4. Visualize | `results/*.png` | features + CSVs |
 
-### Running the pipeline
-1. **Train Baseline:**
-   ```bash
-   poetry run python src/baseline.py
+## CLI Options
+
+```bash
+# Step 1
+python step1_train.py --epochs 15 --lr 5e-5 --only has
+
+# Step 3
+python step3_detect.py --concept-thresh 0.60 --drift-sigma 3.0
+
+# Step 4
+python step4_visualize.py --skip-umap   # skip slow UMAP computation
+
+# Orchestrator
+python run_all.py --skip-train          # reuse existing weights
+python run_all.py --from-step 2         # start from extraction
+python run_all.py --skip-umap           # pass through to step4
+```
+
+## Dependencies
+
+```
+torch torchvision numpy pandas scipy scikit-learn
+matplotlib seaborn umap-learn pillow
+```
