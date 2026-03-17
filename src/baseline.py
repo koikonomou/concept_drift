@@ -9,8 +9,8 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 
 
-TRAIN_DIR = "/home/kate/datasets/landscapes/Landscape Classification/Landscape Classification/Training Data"
-TEST_DIR = "/home/kate/datasets/landscapes/Landscape Classification/Landscape Classification/Testing Data"
+TRAIN_DIR = "/home/katerina/codes/datasets/landscapes/Landscape Classification/Landscape Classification/Training Data"
+TEST_DIR = "/home/katerina/codes/datasets/landscapes/Landscape Classification/Landscape Classification/Testing Data"
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
