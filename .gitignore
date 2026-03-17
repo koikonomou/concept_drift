@@ -1,0 +1,21 @@
+# Environment
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Model weights
+*.pth
+*.h5
+
+# Training artefacts
+*.npz
+*.csv
+*.png
+
+# Dataset
+datasets/
+*.zip
+
+# Poetry
+poetry.lock
