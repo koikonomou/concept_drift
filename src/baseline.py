@@ -7,6 +7,8 @@ from torchvision import models, transforms
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
+from hasseparator import HASeparator
+import torch.nn.functional as F
 
 
 TRAIN_DIR = "/home/kate/datasets/landscapes/Landscape Classification/Landscape Classification/Training Data"
@@ -19,20 +21,28 @@ transform = transforms.Compose([
 ])
 
 class LandscapeBaseline(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=5, proj_dim=256):
         super(LandscapeBaseline, self).__init__()
-        self.backbone = models.resnet50(weights='IMAGENET1K_V1')
-        num_ftrs = self.backbone.fc.in_features
-        self.backbone.fc = nn.Sequential(
-            nn.Linear(num_ftrs, 512),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(512, 5),
-            nn.Sigmoid() 
+        base_resnet = models.resnet50(weights='IMAGENET1K_V1')
+        self.backbone = nn.Sequential(*list(base_resnet.children())[:-1]) # Output: 2048
+        
+        self.embedder = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(2048, proj_dim),
+            nn.BatchNorm1d(proj_dim),
+            nn.SiLU()
         )
+        
 
-    def forward(self, x):
-        return self.backbone(x)
+        self.has_head = HASeparator(input_dim=proj_dim, num_classes=num_classes, margin=0.1, scale=5.0)
+
+    def forward(self, x, labels=None):
+        features = self.backbone(x)
+        embed = self.embedder(features)
+        
+        logits, normalized_embed, penalties = self.has_head(embed, labels)
+        
+        return logits, penalties, normalized_embed
 
 #LANDSCAPE_CLASSES = ['coast', 'desert', 'forest', 'glacier', 'mountain']
 
@@ -55,24 +65,29 @@ if __name__ == "__main__":
     print("Starting Training...")
     for epoch in range(10):
         model.train()
-        total_loss = 0
+        total_loss_accum = 0
         correct = 0
         total = 0
         for imgs, labels in train_loader:
             imgs, labels = imgs.to(device), labels.to(device).long()
             optimizer.zero_grad()
-            outputs = model(imgs)
-            loss = criterion(outputs, labels)
+            logits, penalties, _ = model(imgs, labels)
+            ce_loss = F.cross_entropy(logits, labels)
+            penalty_loss = penalties.mean() if penalties is not None else 0
+            loss = ce_loss + 1.0 * penalty_loss
+            
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
-        
-            _, predicted = outputs.max(1)
+            
+            total_loss_accum += loss.item()
+            
+            _, predicted = logits.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
         
         acc = 100. * correct / total
-        print(f"Epoch {epoch+1} - Loss: {total_loss/len(train_loader):.4f} | Acc: {acc:.2f}%")
-    # Save Baseline
-    torch.save(model.state_dict(), "baseline_landscape.pth")
-    print("Baseline model saved!")
+        print(f"Epoch {epoch+1} - Loss: {total_loss_accum/len(train_loader):.4f} | Acc: {acc:.2f}%")
+
+
+    torch.save(model.state_dict(), "landscape_has_model.pth")
+    print("HAS Baseline model saved!")

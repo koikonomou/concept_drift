@@ -13,7 +13,7 @@ from scipy.stats import ks_2samp
 from sklearn.metrics import pairwise_distances
 
 CUSTOM_DATA_ROOT = "/home/kate/datasets/ARXPHOTOS314/images"
-MODEL_PATH = "baseline_landscape.pth"
+MODEL_PATH = "landscape_has_model.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CLASS_MAP = {
@@ -65,56 +65,46 @@ def evaluate_landscape_drift():
     custom_ds = CustomLandscapeEvalDataset(CUSTOM_DATA_ROOT, transform)
     loader = DataLoader(custom_ds, batch_size=32, shuffle=False)
 
-    all_features, all_preds, all_labels, all_subs = [], [], [], []
-
+    all_normalized_embeds, all_preds, all_labels, all_subs, all_penalties = [], [], [], [], []
+    
     print(f"Evaluating drift on {len(custom_ds)} custom samples...")
     with torch.no_grad():
         for imgs, labels, subs in loader:
-            imgs = imgs.to(DEVICE)
+            imgs, labels_gpu = imgs.to(DEVICE), labels.to(DEVICE).long()
 
-            feat = model.backbone(imgs) 
-            feat = torch.flatten(feat, 1)
-            outputs = model(imgs)
-            _, preds = torch.max(outputs, 1)
+            logits, penalties, norm_embed = model(imgs, labels_gpu)
             
-            all_features.append(feat.cpu().numpy())
+            _, preds = torch.max(logits, 1)
+            
+            all_normalized_embeds.append(norm_embed.cpu().numpy())
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.numpy())
             all_subs.extend(subs)
-
-    features = np.concatenate(all_features)
+            all_penalties.extend(penalties.cpu().numpy())
+    features = np.concatenate(all_normalized_embeds)
     
-    # --- DATA DRIFT CALCULATION ---
-    baseline_centroid = np.mean(features, axis=0)
-    
-    results_list = []
-    for i in range(len(features)):
-        dist = np.linalg.norm(features[i] - baseline_centroid)
-        
-        results_list.append({
-            'label': all_labels[i],
-            'pred': all_preds[i],
-            'sub_category': all_subs[i],
-            'pixel_drift_score': dist # Higher = More Data Drift
-        })
-
-    results_df = pd.DataFrame(results_list)
+    results_df = pd.DataFrame({
+        'label': all_labels,
+        'pred': all_preds,
+        'sub_category': all_subs,
+        'has_penalty': all_penalties
+    })
     results_df['correct'] = results_df['label'] == results_df['pred']
 
     # Grouping to see the relationship between Data Drift and Concept Drift
     drift_report = results_df.groupby('sub_category').agg({
-        'pixel_drift_score': 'mean', # DATA DRIFT
+        'has_penalty': 'mean', # DATA DRIFT
         'correct': 'mean'            # CONCEPT DRIFT (Accuracy)
-    }).sort_values(by='pixel_drift_score', ascending=False)
+    }).sort_values(by='has_penalty', ascending=False)
 
     print("\n--- DRIFT ANALYSIS BY SUB-CATEGORY ---")
     print(drift_report)
     # Identify Pure Concept Drift (Low Visual Change, High Error)
     # We look for categories with Drift below the median but Accuracy below a threshold
-    median_drift = drift_report['pixel_drift_score'].median()
+    median_drift = drift_report['has_penalty'].median()
 
     pure_concept_drift = drift_report[
-        (drift_report['pixel_drift_score'] <= median_drift) & 
+        (drift_report['has_penalty'] <= median_drift) & 
         (drift_report['correct'] < 0.70)
     ]
 
@@ -124,10 +114,9 @@ def evaluate_landscape_drift():
     else:
         print("No pure concept drift found. All errors are linked to visual changes.")
     #Statistical Data Drift (KS-Test)
-    # Comparing two sub-categories directly (e.g., Jungle vs. Olive Tree)
-    # A low p-value confirms the two sets of pixels are from different distributions
-    sample_a = results_df[results_df['sub_category'] == results_df['sub_category'].iloc[0]]['pixel_drift_score']
-    sample_b = results_df[results_df['sub_category'] == results_df['sub_category'].iloc[-1]]['pixel_drift_score']
+
+    sample_a = results_df[results_df['sub_category'] == results_df['sub_category'].iloc[0]]['has_penalty']
+    sample_b = results_df[results_df['sub_category'] == results_df['sub_category'].iloc[-1]]['has_penalty']
     stat, p_val = ks_2samp(sample_a, sample_b)
     print(f"\nStatistical Data Drift (KS-Test) P-Value: {p_val:.4e}")
 
@@ -139,7 +128,6 @@ def plot_landscape_tsne(features, labels, subs):
     reduced = tsne.fit_transform(features)
     
     plt.figure(figsize=(14, 10))
-    # Using a professional palette for the 5 main categories
     scatter = sns.scatterplot(
         x=reduced[:,0], 
         y=reduced[:,1], 
