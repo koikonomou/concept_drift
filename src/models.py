@@ -250,7 +250,8 @@ class HASModel(nn.Module):
         x  = self.stem(x)
         x  = self.l1(x); x = self.l2(x); x = self.l3(x)
         fm = self.l4(x)
-        latent = self.embedder(fm)
-        logits, penalties = self.has_layer(latent, labels)
+        latent_raw = self.embedder(fm)
+        logits, penalties = self.has_layer(latent_raw, labels)
         penalty = penalties.mean()  # reduce_mean over (B, C) -- matches original loss: CE + reduce_mean(penalties)
+        latent = F.normalize(latent_raw, p=2, dim=1)  # HAS operates on unit sphere — drift measured in the same space
         return logits, penalty, latent
