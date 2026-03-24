@@ -35,8 +35,15 @@ def train_baseline(epochs, lr):
     print(f"Classes: {dataset.classes}  |  Samples: {len(dataset)}")
 
     model = BaselineModel(n_classes=len(dataset.classes)).to(DEVICE)
-    opt   = torch.optim.Adam(model.parameters(), lr=lr)
-    ce    = nn.CrossEntropyLoss()
+
+    # SGD with momentum — same optimizer as HAS and original paper
+    opt = torch.optim.SGD(model.parameters(), lr=lr,
+                          momentum=0.9, nesterov=True, weight_decay=1e-4)
+    milestones = [int(epochs * 0.6), int(epochs * 0.8)]
+    scheduler  = torch.optim.lr_scheduler.MultiStepLR(opt, milestones, gamma=0.1)
+    ce         = nn.CrossEntropyLoss()
+    print(f"  Optimizer: SGD(lr={lr}, momentum=0.9, nesterov=True)")
+    print(f"  LR drops at epochs {milestones}")
 
     for ep in range(1, epochs + 1):
         model.train()
@@ -50,8 +57,11 @@ def train_baseline(epochs, lr):
             tot_loss += loss.item()
             correct  += logits.argmax(1).eq(labels).sum().item()
             total    += len(labels)
+        scheduler.step()
+        cur_lr = scheduler.get_last_lr()[0]
         print(f"  Epoch {ep:2d}/{epochs} | "
-              f"Loss {tot_loss/len(loader):.4f} | Acc {100*correct/total:.1f}%")
+              f"Loss {tot_loss/len(loader):.4f} | Acc {100*correct/total:.1f}% | "
+              f"lr={cur_lr:.1e}")
 
     path = os.path.join(WEIGHT_DIR, "baseline.pth")
     torch.save(model.state_dict(), path)
@@ -92,7 +102,7 @@ def train_has(epochs, lr):
 
             opt.zero_grad()
             logits, penalty, _ = model(imgs, labels=labels)
-            loss_nll = nll(logits.clamp(min=1e-7).log(), labels)
+            loss_nll = nll(logits, labels)
             loss = ALPHA * loss_nll + BETA * penalty
             loss.backward(); opt.step()
 
@@ -118,7 +128,7 @@ def main():
     parser = argparse.ArgumentParser(description="Step 1: Train models")
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--lr", type=float, default=LR,
-                        help="Baseline (Adam) learning rate")
+                        help="Baseline (SGD) learning rate")
     parser.add_argument("--has-lr", type=float, default=HAS_LR,
                         help="HAS (SGD) learning rate")
     parser.add_argument("--only", choices=["baseline", "has"],

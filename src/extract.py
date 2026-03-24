@@ -62,9 +62,10 @@ def extract_has(model, loader):
     for imgs, lbls, sub in loader:
         imgs = imgs.to(DEVICE)
         logits, _, latent = model(imgs)  # no labels → penalty is 0
+        probs = logits.exp()             # log_softmax → probabilities
         latents.append(latent.cpu().numpy())
-        preds.append(logits.argmax(1).cpu().numpy())
-        confs.append(logits.max(1).values.cpu().numpy())
+        preds.append(probs.argmax(1).cpu().numpy())
+        confs.append(probs.max(1).values.cpu().numpy())
         labels_all.append(np.array([int(l) for l in lbls]))
         subs.extend(sub)
     if not latents:

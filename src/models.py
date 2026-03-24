@@ -186,9 +186,9 @@ class HASeparatorMultiClass(nn.Module):
         normed_w     = F.normalize(self.weight, p=2, dim=0)
  
         cos_t  = normed_embds @ normed_w
-        logits = F.softmax(self.scale * cos_t, dim=1)
+        logits = F.log_softmax(self.scale * cos_t, dim=1)
  
-        penalty = torch.tensor(0.0, device=embds.device)
+        penalties = torch.zeros(embds.size(0), self.num_classes, device=embds.device)
         if labels is not None:
             labels = labels.long()
             B = embds.size(0)
@@ -197,17 +197,16 @@ class HASeparatorMultiClass(nn.Module):
             dw = gr_w - temp
             normed_dw = F.normalize(dw, p=2, dim=1)
             win = torch.einsum('bd,bdc->bc', normed_embds, normed_dw)
-            penalties = self.margin - torch.clamp(win, max=self.margin)
-            penalty = penalties.sum(dim=1).mean()
- 
-        return logits, penalty
+            penalties = self.margin - torch.clamp(win, max=self.margin)  # (B, C) raw -- matches original
+
+        return logits, penalties  # matches original signature: (logits, penalties)
  
  
 # ─────────────────────────────────────────────────────────────────────────────
 # ResNet50 backbone
 # ─────────────────────────────────────────────────────────────────────────────
 def _resnet50_backbone():
-    resnet = models.resnet50(weights="IMAGENET1K_V1")
+    resnet = models.resnet50(weights=None)   # train from scratch — matches original paper
     stem = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
     return stem, resnet.layer1, resnet.layer2, resnet.layer3, resnet.layer4
  
@@ -252,5 +251,6 @@ class HASModel(nn.Module):
         x  = self.l1(x); x = self.l2(x); x = self.l3(x)
         fm = self.l4(x)
         latent = self.embedder(fm)
-        logits, penalty = self.has_layer(latent, labels)
+        logits, penalties = self.has_layer(latent, labels)
+        penalty = penalties.mean()  # reduce_mean over (B, C) -- matches original loss: CE + reduce_mean(penalties)
         return logits, penalty, latent

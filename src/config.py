@@ -10,9 +10,9 @@ import torch
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA PATHS  (edit these)
 # ─────────────────────────────────────────────────────────────────────────────
-TRAIN_ROOT  = "/home/kate/datasets/landscapes/Landscape Classification/Landscape Classification/Training Data"
-CUSTOM_ROOT = "/home/kate/datasets/ARXPHOTOS314/images"
-TEST_ROOT   = "/home/kate/datasets/landscapes/Landscape Classification/Landscape Classification/Testing Data"
+TRAIN_ROOT  = "/home/katerina/codes/datasets/landscapes/Landscape Classification/Landscape Classification/Training Data"
+CUSTOM_ROOT = "/home/katerina/codes/datasets/ARXPHOTOS314/images"
+TEST_ROOT   = "/home/katerina/codes/datasets/landscapes/Landscape Classification/Landscape Classification/Testing Data"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OUTPUT DIRECTORIES
@@ -24,14 +24,14 @@ RESULT_DIR   = "results"
 # ─────────────────────────────────────────────────────────────────────────────
 # TRAINING HYPERPARAMETERS
 # ─────────────────────────────────────────────────────────────────────────────
-EPOCHS       = 10
-LR           = 1e-4         # Adam LR for baseline
-HAS_LR       = 1e-2         # SGD LR for HAS (higher — SGD needs it)
+EPOCHS       = 50           # from scratch needs more epochs (paper uses 150 on CIFAR-10)
+LR           = 0.1          # SGD LR for baseline — matches original paper
+HAS_LR       = 0.1          # SGD LR for HAS — matches original paper
 BATCH_SIZE   = 32
 ALPHA        = 1.0          # NLL / CE weight
-BETA         = 3.0          # HAS multi-class penalty weight
+BETA         = 1.0          # HAS penalty weight (matches paper's unweighted reduce_mean)
 HAS_MARGIN   = 0.1
-HAS_SCALE    = 15.0
+HAS_SCALE    = 1.0          # matches original paper (scale=1)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DRIFT THRESHOLDS

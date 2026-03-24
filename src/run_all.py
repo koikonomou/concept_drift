@@ -1,14 +1,16 @@
 import argparse
+import os
 import subprocess
 import sys
 
+_SRC = os.path.dirname(os.path.abspath(__file__))
 
 STEPS = [
-    ("src/train.py",     "Train models"),
-    ("src/extract.py",   "Extract features"),
-    ("src/detect.py",    "Drift detection"),
-    ("src/visualize.py", "Visualization"),
-    ("src/analysis.py",  "Analysis")
+    (os.path.join(_SRC, "train.py"),     "Train models"),
+    (os.path.join(_SRC, "extract.py"),   "Extract features"),
+    (os.path.join(_SRC, "detect.py"),    "Drift detection"),
+    (os.path.join(_SRC, "visualize.py"), "Visualization"),
+    (os.path.join(_SRC, "analysis.py"),  "Analysis"),
 ]
 
 
@@ -20,8 +22,9 @@ def run_step(script, label, extra_args=None):
     result = subprocess.run(cmd)
     if result.returncode != 0:
         print(f"\n  ✗ FAILED at: {label}")
-        print(f"    Fix the issue, then re-run:  python {script}")
-        print(f"    Or restart from this step:   python run_all.py --from-step {STEPS.index((script, label)) + 1}")
+        step_n = next(i for i, (s, _) in enumerate(STEPS, 1) if s == script)
+        print(f"    Fix the issue, then re-run:  python {os.path.basename(script)}")
+        print(f"    Or restart from this step:   python run_all.py --from-step {step_n}")
         sys.exit(result.returncode)
     print(f"  ✓ {label} done.")
 
