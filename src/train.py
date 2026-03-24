@@ -1,16 +1,3 @@
-"""
-step1_train.py — Train baseline and HAS models, save weights.
-
-Usage:
-    python step1_train.py                  # train both, 10 epochs
-    python step1_train.py --epochs 15      # custom epoch count
-    python step1_train.py --only baseline  # train just one model
-
-Outputs:
-    weights/baseline.pth
-    weights/has_model.pth
-"""
-
 import argparse
 import torch
 import torch.nn as nn
