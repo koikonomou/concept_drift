@@ -31,7 +31,7 @@ BATCH_SIZE   = 32
 ALPHA        = 1.0          # NLL / CE weight
 BETA         = 1.0          # HAS penalty weight (matches paper's unweighted reduce_mean)
 HAS_MARGIN   = 0.1
-HAS_SCALE    = 30.0         # scale=1 bounds HAS confidence to ~0.65 max (5 classes); 30 gives comparable range to baseline
+HAS_SCALE    = 10.0         # scale=1 → max conf ~0.65; scale=30 → unstable from scratch; scale=10 is the sweet spot
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DRIFT THRESHOLDS
