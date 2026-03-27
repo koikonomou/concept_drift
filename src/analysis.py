@@ -459,6 +459,55 @@ def main():
                   f"concept_drift={r.pct_concept_drifted:.0%} | "
                   f"acc={r.accuracy:.0%}")
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # ADDITION 2 — Hierarchical drift summary
+    # ═══════════════════════════════════════════════════════════════════════
+    hier_path = os.path.join(RESULT_DIR, "hierarchical_drift.json")
+    if os.path.exists(hier_path):
+        print("\n" + "=" * 70)
+        print("HIERARCHICAL DRIFT SUMMARY (ADDITION 2)")
+        print("=" * 70)
+        with open(hier_path) as f:
+            hier = json.load(f)
+
+        hier_bl  = hier.get("baseline", {})
+        hier_has = hier.get("has", {})
+
+        # Which classes are drifted under each model
+        bl_drifted  = [c for c, v in hier_bl.items()  if v.get("class_drifted")]
+        has_drifted = [c for c, v in hier_has.items() if v.get("class_drifted")]
+
+        print(f"\n  Baseline drifted classes : {bl_drifted  or 'none'}")
+        print(f"  HAS      drifted classes : {has_drifted or 'none'}")
+
+        # Agreement between models
+        agree = set(bl_drifted) == set(has_drifted)
+        if agree:
+            print(f"  Agreement               : YES — both models flag the same classes")
+        else:
+            only_bl  = set(bl_drifted)  - set(has_drifted)
+            only_has = set(has_drifted) - set(bl_drifted)
+            if only_bl:
+                print(f"  Only Baseline flags     : {sorted(only_bl)}")
+            if only_has:
+                print(f"  Only HAS flags          : {sorted(only_has)}")
+
+        # Most drifted subclass across both models (highest KS stat)
+        best_ks   = -1.0
+        best_info = ("—", "—", "—", -1.0)
+        for model_tag, hier_data in [("Baseline", hier_bl), ("HAS", hier_has)]:
+            for cls, cls_info in hier_data.items():
+                for sub, sub_info in cls_info.get("subclasses", {}).items():
+                    if sub_info["ks_stat"] > best_ks:
+                        best_ks   = sub_info["ks_stat"]
+                        best_info = (model_tag, cls, sub, best_ks)
+
+        print(f"\n  Most drifted subclass    : {best_info[1]}/{best_info[2]} "
+              f"({best_info[0]}, KS={best_info[3]:.4f})")
+    else:
+        print(f"\n  ⚠ {hier_path} not found — skipping hierarchical summary.")
+        print("    Run step3_detect.py first.")
+
     print("\nStep 5 complete.")
 
 

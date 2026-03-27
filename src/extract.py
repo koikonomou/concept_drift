@@ -10,8 +10,8 @@ Usage:
 Outputs:
     features/bl_train.npz     baseline train features
     features/bl_custom.npz    baseline custom features
-    features/has_train.npz    HAS train features
-    features/has_custom.npz   HAS custom features
+    features/has_train.npz    HAS train features  (+ margins, closest_boundary)
+    features/has_custom.npz   HAS custom features (+ margins, closest_boundary)
     features/meta.npz         class names + dataset sizes
 """
 
@@ -55,10 +55,18 @@ def extract_baseline(model, loader):
                 subs=np.array(subs))
 
 
+# ADDITION 1 — extract_has now also computes per-sample angular margins and
+#              closest_boundary indices using the HAS weight vectors.
 @torch.no_grad()
 def extract_has(model, loader):
     model.eval()
     latents, preds, confs, labels_all, subs = [], [], [], [], []
+    # ADDITION 1 — lists for new margin-based drift signals
+    margins_all, closest_boundary_all = [], []
+
+    # ADDITION 1 — retrieve L2-normalised weight matrix once (shape [64, n_classes])
+    normed_W = model.get_normed_weights()  # stays on the model's device
+
     for imgs, lbls, sub in loader:
         imgs = imgs.to(DEVICE)
         logits, _, latent = model(imgs)  # no labels → penalty is 0
@@ -68,13 +76,35 @@ def extract_has(model, loader):
         confs.append(probs.max(1).values.cpu().numpy())
         labels_all.append(np.array([int(l) for l in lbls]))
         subs.extend(sub)
+
+        # ADDITION 1 — cosine similarities: latent is already L2-normalised
+        # latent: (B, 64),  normed_W: (64, n_classes)
+        # cos_t:  (B, n_classes)
+        cos_t = latent @ normed_W          # (B, n_classes)
+        # Sort descending along class axis
+        cos_sorted, sort_idx = cos_t.sort(dim=1, descending=True)
+        # Angular margin = best cosine − second-best cosine
+        margin = (cos_sorted[:, 0] - cos_sorted[:, 1]).cpu().numpy()  # (B,)
+        # Index of second-best class = drift direction
+        cb = sort_idx[:, 1].cpu().numpy()  # (B,)
+
+        margins_all.append(margin)
+        closest_boundary_all.append(cb)
+
     if not latents:
         return None
-    return dict(latents=np.concatenate(latents),
-                preds=np.concatenate(preds),
-                confs=np.concatenate(confs),
-                labels=np.concatenate(labels_all),
-                subs=np.array(subs))
+
+    result = dict(
+        latents=np.concatenate(latents),
+        preds=np.concatenate(preds),
+        confs=np.concatenate(confs),
+        labels=np.concatenate(labels_all),
+        subs=np.array(subs),
+    )
+    # ADDITION 1 — attach new keys to the same dict (saved into existing .npz)
+    result["margins"]           = np.concatenate(margins_all).astype(np.float32)
+    result["closest_boundary"]  = np.concatenate(closest_boundary_all).astype(np.int32)
+    return result
 
 
 def save_features(data: dict, path: str):

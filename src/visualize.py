@@ -15,6 +15,9 @@ Outputs:
     results/drift_dashboard_has.png
     results/per_feature_ks_baseline.png
     results/per_feature_ks_has.png
+    results/has_margin_analysis.png          (ADDITION 1)
+    results/hierarchical_drift_baseline.png  (ADDITION 2)
+    results/hierarchical_drift_has.png       (ADDITION 2)
 """
 
 import os
@@ -224,6 +227,211 @@ def plot_per_feature_ks_chart(ref_lat, cur_lat, tag):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ADDITION 1 — HAS margin analysis (2-panel figure)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_margin_analysis(df_has, train_margins, custom_margins, tag):
+    """Two-panel figure for HAS angular-margin drift analysis.
+
+    Panel A: overlapping histograms of train vs custom margin distributions.
+    Panel B: bar chart of closest_boundary distribution for margin-drifted
+             samples, showing which class boundary they are approaching.
+
+    Saved as results/has_margin_analysis.png.
+    """
+    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # ── Panel A: margin distributions ──
+    bins = np.linspace(
+        min(train_margins.min(), custom_margins.min()),
+        max(train_margins.max(), custom_margins.max()),
+        40,
+    )
+    ax_a.hist(train_margins,  bins=bins, alpha=0.55, color="#3498db",
+              density=True, label="Train")
+    ax_a.hist(custom_margins, bins=bins, alpha=0.55, color="#e74c3c",
+              density=True, label="Custom")
+    ax_a.set_xlabel("Angular Margin (cos_true − cos_second)")
+    ax_a.set_ylabel("Density")
+    ax_a.set_title(f"HAS Angular Margin Distribution — {tag}")
+    ax_a.legend(fontsize=9)
+    ax_a.grid(alpha=0.2)
+
+    # Mark threshold if margin_drifted column exists
+    if "has_margin_drifted" in df_has.columns and "has_margin" in df_has.columns:
+        non_drifted_margins = df_has.loc[~df_has["has_margin_drifted"], "has_margin"]
+        drifted_margins     = df_has.loc[ df_has["has_margin_drifted"], "has_margin"]
+        # Approximate threshold as the boundary between the two groups
+        if len(non_drifted_margins) and len(drifted_margins):
+            thresh = float(drifted_margins.max())
+            ax_a.axvline(thresh, color="#8e44ad", linestyle="--",
+                         linewidth=1.2, label=f"Threshold ≈ {thresh:.3f}")
+            ax_a.legend(fontsize=9)
+
+    # ── Panel B: drift-direction bar chart ──
+    # Show boundary distribution for margin-drifted custom samples
+    if "has_margin_drifted" in df_has.columns:
+        drifted_mask = df_has["has_margin_drifted"].values.astype(bool)
+    else:
+        drifted_mask = np.ones(len(custom_margins), dtype=bool)
+
+    if "closest_boundary" in df_has.columns:
+        cb_col = df_has["closest_boundary"].values.astype(int)
+    else:
+        # Fall back: use an empty array
+        cb_col = np.zeros(len(df_has), dtype=int)
+
+    drifted_cb = cb_col[drifted_mask]
+    counts = np.bincount(drifted_cb, minlength=len(LANDSCAPE_CLASSES))
+
+    bar_colors = [CLASS_COLORS[i % len(CLASS_COLORS)]
+                  for i in range(len(LANDSCAPE_CLASSES))]
+    ax_b.bar(LANDSCAPE_CLASSES, counts, color=bar_colors, alpha=0.85,
+             edgecolor="white")
+    ax_b.set_xlabel("Closest Boundary Class")
+    ax_b.set_ylabel("Count (margin-drifted samples)")
+    ax_b.set_title(f"Drift Direction — {tag}\n(second-best class for drifted samples)")
+    ax_b.grid(axis="y", alpha=0.2)
+    for i, v in enumerate(counts):
+        if v > 0:
+            ax_b.text(i, v + 0.3, str(v), ha="center", va="bottom", fontsize=9)
+
+    fig.suptitle(f"HAS Margin Drift Analysis — {tag}",
+                 fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    path = os.path.join(RESULT_DIR, "has_margin_analysis.png")
+    fig.savefig(path, dpi=150); plt.close(fig)
+    print(f"  ✓ {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADDITION 1 — Drift direction matrix heatmap
+def plot_direction_matrix(matrix, class_names, title, filename):
+    """Heatmap of the true_class × closest_boundary_class matrix.
+
+    Rows = true class (origin), Columns = closest boundary class (destination).
+    The diagonal is suppressed (grey) — off-diagonal cells show drift direction.
+    A strong off-diagonal cell, e.g. Mountain→Glacier, is immediately visible.
+    """
+    n = len(class_names)
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    # Mask diagonal — self-boundary is not a drift signal
+    display = matrix.copy()
+    diag_vals = np.diag(display).copy()
+    np.fill_diagonal(display, np.nan)
+
+    # Colour map: white=0, deep red=1
+    cmap = plt.cm.YlOrRd
+    cmap.set_bad("#d0d0d0")   # grey for diagonal
+
+    im = ax.imshow(display, cmap=cmap, vmin=0, vmax=max(0.5, np.nanmax(display)))
+
+    # Annotate every cell
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                ax.text(j, i, f"{diag_vals[i]:.0%}",
+                        ha="center", va="center", fontsize=9,
+                        color="#888", fontstyle="italic")
+            else:
+                val = matrix[i, j]
+                weight = "bold" if val > 0.20 else "normal"
+                color  = "white" if val > 0.40 else "black"
+                ax.text(j, i, f"{val:.0%}",
+                        ha="center", va="center", fontsize=10,
+                        fontweight=weight, color=color)
+
+    ax.set_xticks(range(n)); ax.set_xticklabels(class_names, rotation=30, ha="right")
+    ax.set_yticks(range(n)); ax.set_yticklabels(class_names)
+    ax.set_xlabel("Closest Boundary Class  (drifting TOWARD →)", fontsize=10)
+    ax.set_ylabel("True Class  (drifting FROM ↓)", fontsize=10)
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
+
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Fraction of class samples", fontsize=9)
+    cbar.ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
+
+    plt.tight_layout()
+    path = os.path.join(RESULT_DIR, filename)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  ✓ {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_hierarchical_drift(hier_results, model_tag):
+    """Heatmap: rows = landscape classes, columns = unique subclasses.
+
+    Cell colour = KS statistic (white → low, red → high).
+    Missing cells (subclass not present for that class) are grey.
+
+    Saved as results/hierarchical_drift_{model_tag}.png.
+    """
+    # Collect all unique subclass names
+    all_subs = []
+    for cls_info in hier_results.values():
+        for sub in cls_info["subclasses"]:
+            if sub not in all_subs:
+                all_subs.append(sub)
+    all_subs = sorted(all_subs)
+
+    classes = LANDSCAPE_CLASSES
+    n_cls = len(classes)
+    n_sub = len(all_subs)
+
+    if n_sub == 0:
+        print(f"  ⚠ No subclass data for hierarchical heatmap ({model_tag}) — skipping")
+        return
+
+    # Build matrix: NaN = missing, value = KS stat
+    matrix = np.full((n_cls, n_sub), np.nan)
+    for r, cls in enumerate(classes):
+        cls_info = hier_results.get(cls, {})
+        for c, sub in enumerate(all_subs):
+            sub_data = cls_info.get("subclasses", {}).get(sub)
+            if sub_data is not None:
+                matrix[r, c] = sub_data["ks_stat"]
+
+    fig, ax = plt.subplots(figsize=(max(10, n_sub * 0.7 + 2), max(4, n_cls * 0.9 + 2)))
+
+    # Grey background for missing cells
+    bg = np.where(np.isnan(matrix), 1.0, np.nan)
+    ax.imshow(bg, aspect="auto", cmap="Greys", vmin=0, vmax=1,
+              interpolation="nearest")
+
+    # Red heatmap for present cells
+    masked = np.ma.masked_where(np.isnan(matrix), matrix)
+    im = ax.imshow(masked, aspect="auto", cmap="Reds", vmin=0.0, vmax=1.0,
+                   interpolation="nearest")
+
+    # Class-level drift border: bold outline on rows where class_drifted=True
+    for r, cls in enumerate(classes):
+        if hier_results.get(cls, {}).get("class_drifted", False):
+            for spine_pos in [r - 0.5, r + 0.5]:
+                ax.axhline(spine_pos, color="#8e44ad", linewidth=2.0, alpha=0.9)
+
+    ax.set_yticks(range(n_cls))
+    ax.set_yticklabels(classes, fontsize=10)
+    ax.set_xticks(range(n_sub))
+    ax.set_xticklabels(all_subs, rotation=45, ha="right", fontsize=8)
+    ax.set_title(f"Hierarchical Drift Heatmap — {model_tag}\n"
+                 f"(KS statistic; purple outlines = class drifted; grey = absent)",
+                 fontsize=11, fontweight="bold")
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    cbar.set_label("KS Statistic", fontsize=9)
+
+    plt.tight_layout()
+    fname = f"hierarchical_drift_{model_tag.lower().replace(' ', '_')}.png"
+    path = os.path.join(RESULT_DIR, fname)
+    fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
+    print(f"  ✓ {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -286,6 +494,44 @@ def main():
     print("\nPer-feature KS plots …")
     plot_per_feature_ks_chart(bl_train["latents"], bl_custom["latents"], "Baseline")
     plot_per_feature_ks_chart(has_train["latents"], has_custom["latents"], "HAS Model")
+
+    # ADDITION 1 — HAS margin analysis
+    print("\nHAS margin analysis …")
+    plot_margin_analysis(
+        df_has,
+        has_train["margins"],
+        has_custom["margins"],
+        tag="HAS Model",
+    )
+
+    # ADDITION 1 — Drift direction matrix heatmap
+    # This is the plot that directly answers "Mountain → Glacier?"
+    # Rows = true class (origin of drift), Columns = closest boundary (destination).
+    print("\nHAS drift direction matrix …")
+    import numpy as _np
+    from drift_stats import has_drift_direction_matrix as _ddm
+    dir_mat, _ = _ddm(
+        has_custom["latents"].__class__(has_custom["labels"]),  # reuse loaded array
+        has_custom["closest_boundary"],
+        meta["train_classes"], normalise=True)
+    plot_direction_matrix(
+        dir_mat, meta["train_classes"],
+        "HAS Drift Direction Matrix — Custom Set\n"
+        "(off-diagonal = fraction drifting toward that boundary)",
+        "has_drift_direction_matrix.png"
+    )
+
+    # ADDITION 2 — Hierarchical drift heatmaps
+    hier_path = os.path.join(RESULT_DIR, "hierarchical_drift.json")
+    if os.path.exists(hier_path):
+        print("\nHierarchical drift heatmaps …")
+        with open(hier_path) as f:
+            hier_data = json.load(f)
+        plot_hierarchical_drift(hier_data.get("baseline", {}), "baseline")
+        plot_hierarchical_drift(hier_data.get("has", {}),      "has")
+    else:
+        print(f"\n  ⚠ {hier_path} not found — skipping hierarchical heatmaps.")
+        print("    Run step3_detect.py first.")
 
     print("\nStep 4 complete.")
 

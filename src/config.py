@@ -39,6 +39,9 @@ HAS_SCALE    = 10.0         # scale=1 → max conf ~0.65; scale=30 → unstable 
 CONCEPT_THRESH = 0.70       # confidence below this → concept drift
 DRIFT_SIGMA    = 2.0        # data drift = centroid dist > mean + DRIFT_SIGMA*std
 
+# ADDITION 1 — HAS margin drift threshold
+HAS_MARGIN_SIGMA = 2.0      # N sigma for margin-based drift threshold
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LANDSCAPE CLASSES  (for training data)
 # ─────────────────────────────────────────────────────────────────────────────
