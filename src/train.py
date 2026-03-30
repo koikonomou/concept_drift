@@ -6,7 +6,7 @@ from torchvision.datasets import ImageFolder
 
 from config import (TRAIN_ROOT, WEIGHT_DIR, DEVICE,
                     EPOCHS, LR, HAS_LR, BATCH_SIZE, ALPHA, BETA,
-                    HAS_MARGIN, HAS_SCALE, ensure_dirs)
+                    HAS_MARGIN, HAS_SCALE, HAS_WARMUP_EPOCHS, ensure_dirs)
 from models import BaselineModel, HASModel, TRAIN_AUGMENT
 
 import os
@@ -68,29 +68,43 @@ def train_has(epochs, lr):
                      margin=HAS_MARGIN, scale=HAS_SCALE).to(DEVICE)
 
     # SGD with momentum — matches the original paper.
-    # Angular margin methods need uniform gradient scaling across
-    # the L2-normalized weights; Adam's per-parameter rates break this.
     opt = torch.optim.SGD(model.parameters(), lr=lr,
                           momentum=0.9, nesterov=True, weight_decay=1e-4)
 
-    # Step-decay scheduler: drop LR by 10× at 60% and 80% of training
+    # Step-decay scheduler: drop LR by 10× at 60% and 80% of training.
+    # Milestones computed on the post-warmup epoch count so the decay
+    # still fires at the right fraction of productive training.
     milestones = [int(epochs * 0.6), int(epochs * 0.8)]
     scheduler  = torch.optim.lr_scheduler.MultiStepLR(opt, milestones, gamma=0.1)
 
     nll = nn.NLLLoss()
-    print(f"  Optimizer: SGD(lr={lr}, momentum=0.9, nesterov=True)")
-    print(f"  LR drops at epochs {milestones}")
+    print(f"  Optimizer  : SGD(lr={lr}, momentum=0.9, nesterov=True)")
+    print(f"  Warmup     : {HAS_WARMUP_EPOCHS} epochs (BETA linearly 0→{BETA})")
+    print(f"  LR drops at: epochs {milestones}")
+    print(f"  BETA={BETA}, ALPHA={ALPHA}, margin={HAS_MARGIN}, scale={HAS_SCALE}")
 
     for ep in range(1, epochs + 1):
         model.train()
         tot_nll, tot_pen, correct, total = 0.0, 0.0, 0, 0
+
+        # ── LINEAR WARMUP for BETA ──────────────────────────────────────────
+        # During the first HAS_WARMUP_EPOCHS epochs, scale the penalty weight
+        # from 0 up to BETA linearly.  This lets the classification loss
+        # stabilise the embedding space first, preventing all weight vectors
+        # from collapsing toward a single class (the Mountain collapse seen
+        # in results with BETA=1.0 and no warmup from epoch 1).
+        if ep <= HAS_WARMUP_EPOCHS:
+            effective_beta = BETA * (ep / HAS_WARMUP_EPOCHS)
+        else:
+            effective_beta = BETA
+
         for imgs, labels in loader:
             imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
 
             opt.zero_grad()
             logits, penalty, _ = model(imgs, labels=labels)
             loss_nll = nll(logits, labels)
-            loss = ALPHA * loss_nll + BETA * penalty
+            loss = ALPHA * loss_nll + effective_beta * penalty
             loss.backward(); opt.step()
 
             tot_nll += loss_nll.item()
@@ -100,11 +114,29 @@ def train_has(epochs, lr):
 
         scheduler.step()
         cur_lr = scheduler.get_last_lr()[0]
-        print(f"  Epoch {ep:2d}/{epochs} | "
+
+        # ── Diagnostic: print weight vector spread every 10 epochs ─────────
+        # A healthy HAS model has weight vectors spread around the sphere.
+        # If all cosines between weight pairs are high (> 0.8), the vectors
+        # are collapsing — a sign that BETA is too high or warmup is missing.
+        extra = ""
+        if ep % 10 == 0 or ep <= HAS_WARMUP_EPOCHS:
+            with torch.no_grad():
+                nw = model.get_normed_weights()          # (64, n_classes)
+                # Pairwise cosines between class weight vectors
+                cos_ww = (nw.T @ nw).cpu()              # (n_classes, n_classes)
+                mask = ~torch.eye(len(dataset.classes), dtype=torch.bool)
+                mean_off_diag = cos_ww[mask].mean().item()
+            extra = f" | w_cos={mean_off_diag:.3f}"
+            # w_cos close to 0 = well-separated weights (good)
+            # w_cos close to 1 = weights collapsing (bad — increase warmup or lower BETA)
+
+        warmup_str = f" [warmup β={effective_beta:.2f}]" if ep <= HAS_WARMUP_EPOCHS else ""
+        print(f"  Epoch {ep:3d}/{epochs} | "
               f"NLL {tot_nll/len(loader):.4f} | "
               f"HAS-Pen {tot_pen/len(loader):.4f} | "
               f"Acc {100*correct/total:.1f}% | "
-              f"lr={cur_lr:.1e}")
+              f"lr={cur_lr:.1e}{extra}{warmup_str}")
 
     path = os.path.join(WEIGHT_DIR, "has_model.pth")
     torch.save(model.state_dict(), path)

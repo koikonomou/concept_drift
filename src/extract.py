@@ -126,6 +126,27 @@ def save_train_stats(latents, confs, tag):
     print(f"    Confidence:      μ={confs.mean():.4f}, σ={confs.std():.4f}")
 
 
+def save_train_stats_has(latents, confs, margins, tag):
+    """Extended train stats for HAS — includes margin distribution.
+
+    Saves margin_mean and margin_std into the same .npz so detect.py can
+    compute the margin threshold without holding the full margins array
+    in memory.  The raw margins array is already saved in has_train.npz.
+    """
+    centroid = latents.mean(axis=0)
+    dists = np.linalg.norm(latents - centroid, axis=1)
+    path = os.path.join(WEIGHT_DIR, f"{tag}_train_stats.npz")
+    np.savez(path, centroid=centroid,
+             dist_mean=dists.mean(),   dist_std=dists.std(),
+             conf_mean=confs.mean(),   conf_std=confs.std(),
+             # ADDITION 1 — margin stats for threshold computation in detect.py
+             margin_mean=margins.mean(), margin_std=margins.std())
+    print(f"  ✓ Train stats ({tag}) → {path}")
+    print(f"    Latent distance: μ={dists.mean():.4f}, σ={dists.std():.4f}")
+    print(f"    Confidence:      μ={confs.mean():.4f}, σ={confs.std():.4f}")
+    print(f"    Margin:          μ={margins.mean():.4f}, σ={margins.std():.4f}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,7 +185,9 @@ def main():
     save_features(bl_train,  os.path.join(FEATURE_DIR, "bl_train.npz"))
     save_features(has_train, os.path.join(FEATURE_DIR, "has_train.npz"))
     save_train_stats(bl_train["latents"],  bl_train["confs"],  "baseline")
-    save_train_stats(has_train["latents"], has_train["confs"], "has")
+    # ADDITION 1 — use extended stats saver for HAS (includes margin_mean/std)
+    save_train_stats_has(has_train["latents"], has_train["confs"],
+                         has_train["margins"], "has")
 
     # ── Custom data (only the 5 classes that map to training classes) ──
     print("\nExtracting custom features …")

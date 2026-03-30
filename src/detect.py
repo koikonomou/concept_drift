@@ -50,13 +50,18 @@ def load_train_stats(tag):
     if not os.path.exists(path):
         sys.exit(f"ERROR: {path} not found. Run step2_extract.py first.")
     s = np.load(path)
-    return dict(
+    stats = dict(
         centroid=s["centroid"],
         dist_mean=float(s["dist_mean"]),
         dist_std=float(s["dist_std"]),
         conf_mean=float(s["conf_mean"]),
         conf_std=float(s["conf_std"]),
     )
+    # ADDITION 1 — margin stats present only for HAS (saved by save_train_stats_has)
+    if "margin_mean" in s:
+        stats["margin_mean"] = float(s["margin_mean"])
+        stats["margin_std"]  = float(s["margin_std"])
+    return stats
 
 
 def build_records(custom, train_stats, class_names, drift_sigma):
@@ -106,33 +111,87 @@ def build_records(custom, train_stats, class_names, drift_sigma):
 
 
 # ADDITION 1 — build_records_has extends the HAS DataFrame with margin columns
-def build_records_has(custom, train_stats, class_names, drift_sigma,
-                      train_margin_mean, train_margin_std, margin_sigma):
+def build_records_has(custom, train_stats, class_names, drift_sigma, margin_sigma):
     """Per-image drift scores → DataFrame for the HAS model.
 
-    Identical to build_records() but adds two extra columns:
-      has_margin         (float) — per-sample angular margin
-      has_margin_drifted (bool)  — True if margin < train_mean - margin_sigma * train_std
+    Adds these columns on top of the standard build_records() columns:
+
+      has_margin              (float) — per-sample angular margin
+                                        = cos_best − cos_second_best
+      has_margin_drifted      (bool)  — margin below training threshold
+      closest_boundary        (int)   — index of second-best class
+      closest_boundary_class  (str)   — human-readable name
+      has_drift_type_margin   (str)   — ADDITION: geometrically grounded 4-way
+                                        label using margin for concept drift
+                                        instead of softmax confidence.
+
+    has_drift_type_margin logic (the 2×2 table):
+    ─────────────────────────────────────────────────────────────────
+    data_drifted  margin_drifted  →  has_drift_type_margin
+    ─────────────────────────────────────────────────────────────────
+    False         False           →  "In-Distribution"
+    True          False           →  "Pure Data Drift"
+                                     Far from training cloud but well
+                                     inside a class region — distribution
+                                     shift without functional confusion.
+    False         True            →  "Pure Concept Drift"
+                                     Familiar-looking image but near a
+                                     decision boundary — genuine ambiguity.
+    True          True            →  "Full Drift (both)"
+                                     Alien image AND near a boundary —
+                                     the worst case.
+    ─────────────────────────────────────────────────────────────────
+
+    This is strictly more informative than the confidence-based label
+    (drift_type) because:
+      • margin is scale-independent (σ=10 does not inflate it)
+      • margin directly measures HAS's training objective erosion
+      • it distinguishes Pure Data Drift from Full Drift even when
+        confidence stays high due to the scale factor
     """
+    # Base records via the shared function
     df, data_thresh, concept_thresh = build_records(
         custom, train_stats, class_names, drift_sigma)
 
-    margin_thresh = train_margin_mean - margin_sigma * train_margin_std
+    # ── Margin threshold from saved training stats ──────────────────────────
+    # Prefer stats loaded from .npz (saved by save_train_stats_has).
+    # Fall back to computing from the raw training margins array if the .npz
+    # was produced by an older extract.py that didn't save margin stats.
+    if "margin_mean" in train_stats and "margin_std" in train_stats:
+        tmean = train_stats["margin_mean"]
+        tstd  = train_stats["margin_std"]
+    else:
+        # Legacy fallback — should not be needed after re-running extract.py
+        import warnings
+        warnings.warn("margin_mean not in train_stats — re-run extract.py")
+        tmean = float(np.mean(custom["margins"]))   # approximate only
+        tstd  = float(np.std(custom["margins"]))
 
-    margins  = custom["margins"]           # (N,)
-    cb       = custom["closest_boundary"]  # (N,) int — BUG FIX: was missing
+    margin_thresh = tmean - margin_sigma * tstd
 
-    df["has_margin"]              = margins.astype(float)
-    df["has_margin_drifted"]      = margins < margin_thresh
-    # BUG FIX — closest_boundary and its human-readable class name were never
-    # added to the DataFrame; visualize.py fell back to zeros (all = Coast).
-    df["closest_boundary"]        = cb.astype(int)
-    df["closest_boundary_class"]  = [
+    margins = custom["margins"]           # (N,)
+    cb      = custom["closest_boundary"]  # (N,) int
+
+    df["has_margin"]             = margins.astype(float)
+    df["has_margin_drifted"]     = margins < margin_thresh
+    df["closest_boundary"]       = cb.astype(int)
+    df["closest_boundary_class"] = [
         class_names[int(c)] if int(c) < len(class_names) else str(c)
         for c in cb
     ]
 
-    return df, data_thresh, concept_thresh
+    # ── Geometrically grounded 4-way drift label ────────────────────────────
+    def _margin_drift_type(row):
+        d = row["data_drifted"]
+        m = row["has_margin_drifted"]
+        if   not d and not m: return "In-Distribution"
+        elif     d and not m: return "Pure Data Drift"
+        elif not d and     m: return "Pure Concept Drift"
+        else:                 return "Full Drift (both)"
+
+    df["has_drift_type_margin"] = df.apply(_margin_drift_type, axis=1)
+
+    return df, data_thresh, concept_thresh, tmean, tstd, margin_thresh
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -269,22 +328,19 @@ def main():
     df_bl, bl_data_th, bl_conf_th = build_records(
         bl_custom, bl_stats, LANDSCAPE_CLASSES, args.drift_sigma)
 
-    # ADDITION 1 — HAS DataFrame includes margin columns
-    train_margin_mean = float(np.mean(train_margins))
-    train_margin_std  = float(np.std(train_margins))
-    df_has, has_data_th, has_conf_th = build_records_has(
-        has_custom, has_stats, LANDSCAPE_CLASSES, args.drift_sigma,
-        train_margin_mean, train_margin_std, HAS_MARGIN_SIGMA)
+    # ADDITION 1 — HAS DataFrame: margin stats now loaded from train_stats .npz
+    df_has, has_data_th, has_conf_th, tmean, tstd, margin_thresh = build_records_has(
+        has_custom, has_stats, LANDSCAPE_CLASSES,
+        args.drift_sigma, HAS_MARGIN_SIGMA)
 
     print(f"\n  Thresholds (σ={args.drift_sigma}):")
     print(f"    Baseline — data drift > {bl_data_th:.4f}, "
           f"concept drift < {bl_conf_th:.4f} confidence")
     print(f"    HAS      — data drift > {has_data_th:.4f}, "
           f"concept drift < {has_conf_th:.4f} confidence")
-    # ADDITION 1
-    has_margin_thresh = train_margin_mean - HAS_MARGIN_SIGMA * train_margin_std
-    print(f"    HAS margin < {has_margin_thresh:.4f} → margin drifted "
-          f"({df_has['has_margin_drifted'].mean() * 100:.1f}% flagged)")
+    print(f"    HAS margin < {margin_thresh:.4f} "
+          f"(train μ={tmean:.4f}, σ={tstd:.4f}) → "
+          f"{df_has['has_margin_drifted'].mean() * 100:.1f}% margin-drifted")
 
     bl_csv  = os.path.join(RESULT_DIR, "drift_baseline.csv")
     has_csv = os.path.join(RESULT_DIR, "drift_has.csv")
@@ -312,6 +368,56 @@ def main():
     # ADDITION 1
     md = df_has["has_margin_drifted"].mean() * 100
     print(f"  {'HAS':10s} | Margin-drifted {md:5.1f}%")
+
+    # ── ADDITION 1 — Drift taxonomy comparison ──────────────────────────────
+    # Side-by-side table of the three drift classification systems:
+    #   (A) Baseline:   confidence-based 4-way label
+    #   (B) HAS conf:   same formula applied to HAS (scale-distorted)
+    #   (C) HAS margin: geometrically grounded 4-way label  ← the new one
+    #
+    # Key question: what does margin catch that confidence misses?
+    # Specifically: Pure Data Drift cases where softmax confidence is high
+    # (because σ=10 inflates it) but the angular margin has eroded — the
+    # embedding is near a boundary despite high confidence.
+    print("\n" + "=" * 62)
+    print("DRIFT TAXONOMY COMPARISON")
+    print("  (A) Baseline confidence  (B) HAS confidence  (C) HAS margin")
+    print("=" * 62)
+
+    def _pct(df_in, col, label):
+        return (df_in[col] == label).mean() * 100
+
+    print(f"\n  {'Category':<28} {'Baseline(A)':>12} {'HAS-conf(B)':>12} {'HAS-margin(C)':>14}")
+    print("  " + "-" * 70)
+
+    rows_cmp = [
+        ("In-Distribution",       "In-Distribution",    "In-Distribution",    "In-Distribution"),
+        ("Data Drift",             "Data Drift",          "Data Drift",         "Pure Data Drift"),
+        ("Concept Drift",          "Concept Drift",       "Concept Drift",      "Pure Concept Drift"),
+        ("Full Drift (both)",      "Full Drift (both)",   "Full Drift (both)",  "Full Drift (both)"),
+    ]
+    for label_display, col_bl, col_has_conf, col_has_margin in rows_cmp:
+        a = _pct(df_bl,  "drift_type",           col_bl)
+        b = _pct(df_has, "drift_type",            col_has_conf)
+        c = _pct(df_has, "has_drift_type_margin", col_has_margin)
+        print(f"  {label_display:<28} {a:>11.1f}% {b:>11.1f}% {c:>13.1f}%")
+
+    # Highlight images that margin flags but confidence misses
+    print()
+    pure_data   = df_has["has_drift_type_margin"] == "Pure Data Drift"
+    hidden_dd   = (df_has.loc[pure_data, "drift_type"] == "In-Distribution").sum()
+    pure_conc   = df_has["has_drift_type_margin"] == "Pure Concept Drift"
+    hidden_cd   = (df_has.loc[pure_conc, "drift_type"] == "In-Distribution").sum()
+
+    if hidden_dd > 0:
+        print(f"  ► {hidden_dd} images ({hidden_dd/len(df_has)*100:.1f}%) are Pure Data Drift by margin")
+        print(f"    but In-Distribution by confidence — σ={10} scale was hiding them.")
+    if hidden_cd > 0:
+        print(f"  ► {hidden_cd} images ({hidden_cd/len(df_has)*100:.1f}%) are Pure Concept Drift by margin")
+        print(f"    but In-Distribution by confidence — boundary erosion invisible in conf.")
+    if hidden_dd == 0 and hidden_cd == 0:
+        print(f"  ► Margin and confidence agree on all samples (model well-trained or")
+        print(f"    margin threshold negative — check HAS training convergence).")
 
     # ═══════════════════════════════════════════════════════════════════════
     # ADDITION 2 — Hierarchical drift analysis

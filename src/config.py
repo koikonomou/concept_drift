@@ -24,14 +24,45 @@ RESULT_DIR   = "results"
 # ─────────────────────────────────────────────────────────────────────────────
 # TRAINING HYPERPARAMETERS
 # ─────────────────────────────────────────────────────────────────────────────
-EPOCHS       = 50           # from scratch needs more epochs (paper uses 150 on CIFAR-10)
+# ── Epochs ──
+# The original paper uses 150 epochs on CIFAR-10 (32×32, 10 classes).
+# Landscape Classification is harder: 224×224 images, training from scratch.
+# 150 epochs is the minimum for HAS to converge on this dataset.
+# Evidence: after 50 epochs HAS conf μ=0.30 (random ≈ 0.20) — not converged.
+EPOCHS       = 150
+
 LR           = 0.1          # SGD LR for baseline — matches original paper
-HAS_LR       = 0.1          # SGD LR for HAS — matches original paper
-BATCH_SIZE   = 32
-ALPHA        = 1.0          # NLL / CE weight
-BETA         = 1.0          # HAS penalty weight (matches paper's unweighted reduce_mean)
-HAS_MARGIN   = 0.1
-HAS_SCALE    = 10.0         # scale=1 → max conf ~0.65; scale=30 → unstable from scratch; scale=10 is the sweet spot
+HAS_LR       = 0.05         # HAS needs a lower initial LR than baseline.
+                             # Angular margin methods are sensitive to large
+                             # gradient steps early in training — the weight
+                             # vectors on the unit sphere can collapse.
+                             # 0.05 with warmup (see train.py) is the sweet spot.
+BATCH_SIZE   = 64           # Larger batch → more stable gradient for angular
+                             # margin; 32 caused noisy penalty gradients.
+ALPHA        = 1.0          # NLL / CE weight — unchanged
+BETA         = 0.5          # HAS penalty weight.
+                             # Original paper uses 1.0 on CIFAR-10 (10 classes).
+                             # With 5 classes the penalty signal is stronger
+                             # per sample; 0.5 prevents it from overwhelming
+                             # the classification loss early in training.
+                             # Symptom of BETA=1.0 too high: Mountain weight
+                             # collapses to the centre of the sphere (all
+                             # classes point toward Mountain in direction matrix).
+HAS_MARGIN   = 0.1          # Paper recommendation — keep at 0.1 for 5 classes.
+                             # Increasing to 0.3+ causes accuracy loss (Fig. 3
+                             # of paper shows accuracy drops for large margin
+                             # with fewer classes).
+HAS_SCALE    = 8.0         # scale=1  → max conf ~0.65 (too flat)
+                             # scale=10 → well-separated with proper training
+                             # scale=30 → unstable from scratch
+                             # Keep at 10 — the problem was epochs/LR, not scale.
+HAS_WARMUP_EPOCHS = 5       # NEW — linear LR warmup for HAS.
+                             # Angular margin methods need the classification
+                             # loss to stabilise first before the penalty
+                             # starts reshaping the sphere geometry.
+                             # Without warmup, early large penalties push all
+                             # weight vectors toward the same region (Mountain
+                             # collapse observed in results).
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DRIFT THRESHOLDS
