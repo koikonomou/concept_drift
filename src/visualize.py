@@ -1,434 +1,268 @@
-"""
-Generate all plots from saved features + CSV.
-
-No GPU needed. Reads .npz from step2 and CSVs from step3.
-
-Usage:
-    python step4_visualize.py
-    python step4_visualize.py --skip-umap    # faster, skip UMAP computation
-
-Outputs:
-    results/umap_baseline.png
-    results/umap_has.png
-    results/umap_side_by_side.png
-    results/drift_dashboard_baseline.png
-    results/drift_dashboard_has.png
-    results/per_feature_ks_baseline.png
-    results/per_feature_ks_has.png
-    results/has_margin_analysis.png          (ADDITION 1)
-    results/hierarchical_drift_baseline.png  (ADDITION 2)
-    results/hierarchical_drift_has.png       (ADDITION 2)
-"""
-
-import os
-import sys
-import json
-import argparse
+import os, sys, json, argparse
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.lines import Line2D
 
 from config import FEATURE_DIR, RESULT_DIR, LANDSCAPE_CLASSES, ensure_dirs
-from drift_stats import per_feature_ks
 
+plt.rcParams.update({
+    "font.family": "sans-serif", "font.size": 11,
+    "axes.titlesize": 12, "axes.labelsize": 11,
+    "figure.facecolor": "white", "axes.facecolor": "white",
+    "axes.grid": True, "grid.alpha": 0.2,
+})
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Palettes
-# ─────────────────────────────────────────────────────────────────────────────
-CLASS_COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#17becf", "#9467bd",
-    "#d62728", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
-    "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
-]
+CLASS_COLORS = {
+    "Coast":    "#0077b6", "Desert":  "#e76f51",
+    "Forest":   "#2d6a4f", "Glacier": "#48cae4",
+    "Mountain": "#7b2cbf",
+}
 
-DRIFT_PALETTE = {
-    "In-Distribution":   "#2ecc71",
-    "Data Drift":        "#3498db",
-    "Concept Drift":     "#e74c3c",
-    "Full Drift (both)": "#8e44ad",
+DRIFT_COLORS = {
+    "In-Distribution":    "#2ecc71",
+    "Pure Data Drift":    "#3498db",
+    "Data Drift":         "#3498db",
+    "Pure Concept Drift": "#e74c3c",
+    "Concept Drift":      "#e74c3c",
+    "Full Drift (both)":  "#8e44ad",
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Loaders
-# ─────────────────────────────────────────────────────────────────────────────
-
-def load_npz(name):
-    path = os.path.join(FEATURE_DIR, f"{name}.npz")
+def _load_csv(name):
+    path = os.path.join(RESULT_DIR, name)
     if not os.path.exists(path):
-        sys.exit(f"ERROR: {path} not found. Run step2_extract.py first.")
-    data = np.load(path, allow_pickle=True)
-    return {k: data[k] for k in data.files}
-
-
-def load_csv(name):
-    path = os.path.join(RESULT_DIR, f"{name}.csv")
-    if not os.path.exists(path):
-        sys.exit(f"ERROR: {path} not found. Run step3_detect.py first.")
+        sys.exit(f"ERROR: {path} not found. Run detect.py first.")
     return pd.read_csv(path)
 
 
-def load_meta():
-    path = os.path.join(FEATURE_DIR, "meta.json")
-    with open(path) as f:
-        return json.load(f)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# UMAP
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compute_umap(ref_latents, cur_latents, n_neighbors=15, min_dist=0.1):
-    try:
-        import umap
-    except ImportError:
-        sys.exit("Install umap-learn:  pip install umap-learn")
-    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist,
-                        n_components=2, random_state=42, metric="euclidean")
-    combined = np.vstack([ref_latents, cur_latents])
-    emb = reducer.fit_transform(combined)
-    n = len(ref_latents)
-    return emb[:n], emb[n:]
-
-
-def plot_umap_panel(ax, emb_ref, emb_cur, ref_labels, drift_labels, class_names):
-    for i, cls in enumerate(class_names):
-        mask = ref_labels == i
-        if mask.any():
-            c = CLASS_COLORS[i % len(CLASS_COLORS)]
-            ax.scatter(emb_ref[mask, 0], emb_ref[mask, 1],
-                       c=c, alpha=0.2, s=12, label=f"Train: {cls}")
-
-    for dtype, colour in DRIFT_PALETTE.items():
-        mask = drift_labels == dtype
-        if mask.any():
-            ax.scatter(emb_cur[mask, 0], emb_cur[mask, 1],
-                       c=colour, marker="x", s=35, linewidths=1.0,
-                       alpha=0.8, label=dtype)
-    ax.set_xticks([]); ax.set_yticks([])
-
-
-def plot_single_umap(emb_ref, emb_cur, ref_labels, drift_labels,
-                     class_names, title, filename):
-    fig, ax = plt.subplots(figsize=(10, 8))
-    plot_umap_panel(ax, emb_ref, emb_cur, ref_labels, drift_labels, class_names)
-    ax.set_title(title, fontsize=13, fontweight="bold")
-    ax.legend(loc="best", fontsize=8, markerscale=1.5)
-    plt.tight_layout()
-    path = os.path.join(RESULT_DIR, filename)
-    fig.savefig(path, dpi=150); plt.close(fig)
-    print(f"  ✓ {path}")
-
-
-def plot_side_by_side(emb_ref_bl, emb_cur_bl, ref_lbl_bl, drift_bl,
-                      emb_ref_has, emb_cur_has, ref_lbl_has, drift_has,
-                      train_classes):
-    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
-
-    plot_umap_panel(axes[0], emb_ref_bl, emb_cur_bl,
-                    ref_lbl_bl, drift_bl, train_classes)
-    axes[0].set_title("UMAP — Baseline (no HAS)", fontsize=13, fontweight="bold")
-
-    plot_umap_panel(axes[1], emb_ref_has, emb_cur_has,
-                    ref_lbl_has, drift_has, train_classes)
-    axes[1].set_title("UMAP — HAS Model", fontsize=13, fontweight="bold")
-
-    # Shared legend
-    handles = []
-    for i, cls in enumerate(train_classes):
-        c = CLASS_COLORS[i % len(CLASS_COLORS)]
-        handles.append(Line2D([0], [0], marker="o", color="w",
-                              markerfacecolor=c, markersize=7, alpha=0.5,
-                              label=f"Train: {cls}"))
-    for dt, c in DRIFT_PALETTE.items():
-        handles.append(Line2D([0], [0], marker="x", color=c, linestyle="",
-                              markersize=8, label=dt))
-    fig.legend(handles=handles, loc="lower center", ncol=5, fontsize=10,
-               frameon=True, fancybox=True)
-    plt.tight_layout(rect=[0, 0.08, 1, 1])
-
-    path = os.path.join(RESULT_DIR, "umap_side_by_side.png")
-    fig.savefig(path, dpi=180); plt.close(fig)
-    print(f"  ✓ {path}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Dashboard (4-panel)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def plot_dashboard(df, tag):
-    fig = plt.figure(figsize=(16, 12))
-    gs  = gridspec.GridSpec(2, 2, hspace=0.32, wspace=0.28)
-
-    # A — dual drift scatter
-    ax1 = fig.add_subplot(gs[0, 0])
-    for dt, c in DRIFT_PALETTE.items():
-        m = df["drift_type"] == dt
-        ax1.scatter(df.loc[m, "data_drift_score"],
-                    df.loc[m, "concept_drift_score"],
-                    c=c, label=dt, alpha=0.5, s=25, edgecolors="none")
-    ax1.set_xlabel("Data Drift Score"); ax1.set_ylabel("Concept Drift Score")
-    ax1.set_title("Dual Drift Map"); ax1.legend(fontsize=8); ax1.grid(alpha=0.2)
-
-    # B — confidence by drift type
-    ax2 = fig.add_subplot(gs[0, 1])
-    for dt, c in DRIFT_PALETTE.items():
-        vals = df.loc[df["drift_type"] == dt, "max_confidence"]
-        if len(vals):
-            ax2.hist(vals, bins=25, alpha=0.45, color=c, label=dt, density=True)
-    ax2.set_xlabel("Max Softmax Confidence"); ax2.set_ylabel("Density")
-    ax2.set_title("Confidence by Drift Type"); ax2.legend(fontsize=8); ax2.grid(alpha=0.2)
-
-    # C — per-class accuracy
-    ax3 = fig.add_subplot(gs[1, 0])
-    acc = df.groupby("true_class")["correct"].mean().sort_values()
-    ax3.barh(acc.index, acc.values, color="#3498db")
-    ax3.set_xlabel("Accuracy"); ax3.set_title("Per-Class Accuracy")
-    ax3.set_xlim(0, 1); ax3.grid(axis="x", alpha=0.2)
-
-    # D — pie chart
-    ax4 = fig.add_subplot(gs[1, 1])
-    counts = df["drift_type"].value_counts()
-    ax4.pie(counts, labels=counts.index, autopct="%1.1f%%",
-            colors=[DRIFT_PALETTE.get(k, "#999") for k in counts.index],
-            startangle=140)
-    ax4.set_title("Drift Type Distribution")
-
-    fig.suptitle(f"Drift Dashboard — {tag}", fontsize=15, fontweight="bold")
-    path = os.path.join(RESULT_DIR,
-                        f"drift_dashboard_{tag.lower().replace(' ', '_')}.png")
-    fig.savefig(path, dpi=150); plt.close(fig)
-    print(f"  ✓ {path}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-feature KS bar chart
-# ─────────────────────────────────────────────────────────────────────────────
-
-def plot_per_feature_ks_chart(ref_lat, cur_lat, tag):
-    result = per_feature_ks(ref_lat, cur_lat)
-    fig, ax = plt.subplots(figsize=(14, 4))
-    colours = ["#e74c3c" if p < 0.05 else "#2ecc71" for p in result["p_values"]]
-    ax.bar(range(result["n_features"]), result["stats"], color=colours, width=0.8)
-    ax.set_xlabel("Latent Dimension"); ax.set_ylabel("KS Statistic")
-    ax.set_title(f"Per-Feature KS — {tag}  "
-                 f"({result['n_drifted']}/{result['n_features']} drifted)")
-    ax.axhline(0.1, color="#999", linestyle="--", alpha=0.5)
-    ax.grid(axis="y", alpha=0.2)
-    plt.tight_layout()
-    path = os.path.join(RESULT_DIR,
-                        f"per_feature_ks_{tag.lower().replace(' ', '_')}.png")
-    fig.savefig(path, dpi=150); plt.close(fig)
-    print(f"  ✓ {path}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ADDITION 1 — HAS margin analysis (2-panel figure)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def plot_margin_analysis(df_has, train_margins, custom_margins, tag):
-    """Two-panel figure for HAS angular-margin drift analysis.
-
-    Panel A: overlapping histograms of train vs custom margin distributions.
-    Panel B: bar chart of closest_boundary distribution for margin-drifted
-             samples, showing which class boundary they are approaching.
-
-    Saved as results/has_margin_analysis.png.
-    """
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5))
-
-    # ── Panel A: margin distributions ──
-    bins = np.linspace(
-        min(train_margins.min(), custom_margins.min()),
-        max(train_margins.max(), custom_margins.max()),
-        40,
-    )
-    ax_a.hist(train_margins,  bins=bins, alpha=0.55, color="#3498db",
-              density=True, label="Train")
-    ax_a.hist(custom_margins, bins=bins, alpha=0.55, color="#e74c3c",
-              density=True, label="Custom")
-    ax_a.set_xlabel("Angular Margin (cos_true − cos_second)")
-    ax_a.set_ylabel("Density")
-    ax_a.set_title(f"HAS Angular Margin Distribution — {tag}")
-    ax_a.legend(fontsize=9)
-    ax_a.grid(alpha=0.2)
-
-    # Mark threshold if margin_drifted column exists
-    if "has_margin_drifted" in df_has.columns and "has_margin" in df_has.columns:
-        non_drifted_margins = df_has.loc[~df_has["has_margin_drifted"], "has_margin"]
-        drifted_margins     = df_has.loc[ df_has["has_margin_drifted"], "has_margin"]
-        # Approximate threshold as the boundary between the two groups
-        if len(non_drifted_margins) and len(drifted_margins):
-            thresh = float(drifted_margins.max())
-            ax_a.axvline(thresh, color="#8e44ad", linestyle="--",
-                         linewidth=1.2, label=f"Threshold ≈ {thresh:.3f}")
-            ax_a.legend(fontsize=9)
-
-    # ── Panel B: drift-direction bar chart ──
-    # Show boundary distribution for margin-drifted custom samples
-    if "has_margin_drifted" in df_has.columns:
-        drifted_mask = df_has["has_margin_drifted"].values.astype(bool)
-    else:
-        drifted_mask = np.ones(len(custom_margins), dtype=bool)
-
-    if "closest_boundary" in df_has.columns:
-        cb_col = df_has["closest_boundary"].values.astype(int)
-    else:
-        # Fall back: use an empty array
-        cb_col = np.zeros(len(df_has), dtype=int)
-
-    drifted_cb = cb_col[drifted_mask]
-    counts = np.bincount(drifted_cb, minlength=len(LANDSCAPE_CLASSES))
-
-    bar_colors = [CLASS_COLORS[i % len(CLASS_COLORS)]
-                  for i in range(len(LANDSCAPE_CLASSES))]
-    ax_b.bar(LANDSCAPE_CLASSES, counts, color=bar_colors, alpha=0.85,
-             edgecolor="white")
-    ax_b.set_xlabel("Closest Boundary Class")
-    ax_b.set_ylabel("Count (margin-drifted samples)")
-    ax_b.set_title(f"Drift Direction — {tag}\n(second-best class for drifted samples)")
-    ax_b.grid(axis="y", alpha=0.2)
-    for i, v in enumerate(counts):
-        if v > 0:
-            ax_b.text(i, v + 0.3, str(v), ha="center", va="bottom", fontsize=9)
-
-    fig.suptitle(f"HAS Margin Drift Analysis — {tag}",
-                 fontsize=13, fontweight="bold")
-    plt.tight_layout()
-    path = os.path.join(RESULT_DIR, "has_margin_analysis.png")
-    fig.savefig(path, dpi=150); plt.close(fig)
-    print(f"  ✓ {path}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ADDITION 1 — Drift direction matrix heatmap
-def plot_direction_matrix(matrix, class_names, title, filename):
-    """Heatmap of the true_class × closest_boundary_class matrix.
-
-    Rows = true class (origin), Columns = closest boundary class (destination).
-    The diagonal is suppressed (grey) — off-diagonal cells show drift direction.
-    A strong off-diagonal cell, e.g. Mountain→Glacier, is immediately visible.
-    """
-    n = len(class_names)
-    fig, ax = plt.subplots(figsize=(7, 6))
-
-    # Mask diagonal — self-boundary is not a drift signal
-    display = matrix.copy()
-    diag_vals = np.diag(display).copy()
-    np.fill_diagonal(display, np.nan)
-
-    # Colour map: white=0, deep red=1
-    cmap = plt.cm.YlOrRd
-    cmap.set_bad("#d0d0d0")   # grey for diagonal
-
-    im = ax.imshow(display, cmap=cmap, vmin=0, vmax=max(0.5, np.nanmax(display)))
-
-    # Annotate every cell
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                ax.text(j, i, f"{diag_vals[i]:.0%}",
-                        ha="center", va="center", fontsize=9,
-                        color="#888", fontstyle="italic")
-            else:
-                val = matrix[i, j]
-                weight = "bold" if val > 0.20 else "normal"
-                color  = "white" if val > 0.40 else "black"
-                ax.text(j, i, f"{val:.0%}",
-                        ha="center", va="center", fontsize=10,
-                        fontweight=weight, color=color)
-
-    ax.set_xticks(range(n)); ax.set_xticklabels(class_names, rotation=30, ha="right")
-    ax.set_yticks(range(n)); ax.set_yticklabels(class_names)
-    ax.set_xlabel("Closest Boundary Class  (drifting TOWARD →)", fontsize=10)
-    ax.set_ylabel("True Class  (drifting FROM ↓)", fontsize=10)
-    ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
-
-    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Fraction of class samples", fontsize=9)
-    cbar.ax.yaxis.set_major_formatter(
-        plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
-
-    plt.tight_layout()
-    path = os.path.join(RESULT_DIR, filename)
-    fig.savefig(path, dpi=150)
+def _save(fig, name):
+    path = os.path.join(RESULT_DIR, name)
+    fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
     print(f"  ✓ {path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Figure 1 — Drift taxonomy comparison
+# ─────────────────────────────────────────────────────────────────────────────
 
-def plot_hierarchical_drift(hier_results, model_tag):
-    """Heatmap: rows = landscape classes, columns = unique subclasses.
+def plot_taxonomy(df_bl, df_has):
+    """Grouped bar chart comparing three detection systems.
 
-    Cell colour = KS statistic (white → low, red → high).
-    Missing cells (subclass not present for that class) are grey.
+    Each group of 3 bars = one drift category.
+    Bar 1 (light)  = Baseline confidence
+    Bar 2 (mid)    = HAS confidence (same formula, different model)
+    Bar 3 (hatched)= HAS margin — the proposed method
 
-    Saved as results/hierarchical_drift_{model_tag}.png.
+    The gap between bar 2 and bar 3 is the key result: what the geometric
+    margin catches that softmax confidence misses.
     """
-    # Collect all unique subclass names
-    all_subs = []
-    for cls_info in hier_results.values():
-        for sub in cls_info["subclasses"]:
-            if sub not in all_subs:
-                all_subs.append(sub)
-    all_subs = sorted(all_subs)
+    categories = [
+        ("In-Distribution",   "In-Distribution",   "In-Distribution",   "In-Distribution"),
+        ("Data Drift",        "Data Drift",         "Data Drift",        "Pure Data Drift"),
+        ("Concept Drift",     "Concept Drift",      "Concept Drift",     "Pure Concept Drift"),
+        ("Full Drift (both)", "Full Drift (both)",  "Full Drift (both)", "Full Drift (both)"),
+    ]
 
-    classes = LANDSCAPE_CLASSES
-    n_cls = len(classes)
-    n_sub = len(all_subs)
+    def pct(df, col, lbl):
+        return (df[col] == lbl).mean() * 100
 
-    if n_sub == 0:
-        print(f"  ⚠ No subclass data for hierarchical heatmap ({model_tag}) — skipping")
+    x = np.arange(len(categories))
+    w = 0.26
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    bar_colors = ["#2ecc71", "#3498db", "#e74c3c", "#8e44ad"]
+
+    for i, (lbl, ca, cb, cc) in enumerate(categories):
+        a = pct(df_bl,  "drift_type",           ca)
+        b = pct(df_has, "drift_type",            cb)
+        c = pct(df_has, "has_drift_type_margin", cc)
+        col = bar_colors[i]
+        kw  = dict(edgecolor="white", linewidth=0.8)
+        b1 = ax.bar(x[i] - w, a, w, color=col, alpha=0.45, **kw)
+        b2 = ax.bar(x[i],     b, w, color=col, alpha=0.75, **kw)
+        b3 = ax.bar(x[i] + w, c, w, color=col, alpha=1.00,
+                    hatch="///", **kw)
+        for bar, val in [(b1,a),(b2,b),(b3,c)]:
+            if val > 0.8:
+                ax.text(bar[0].get_x() + bar[0].get_width()/2,
+                        val + 0.5, f"{val:.1f}%",
+                        ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([c[0] for c in categories], fontsize=10)
+    ax.set_ylabel("% of custom images")
+    ax.set_ylim(0, ax.get_ylim()[1] * 1.18)
+    ax.set_title("Figure 1 — Drift Taxonomy Comparison\n"
+                 "Light = Baseline (confidence)  |  Mid = HAS (confidence)  "
+                 "|  Dark hatched = HAS (margin) — proposed",
+                 fontweight="bold")
+
+    from matplotlib.patches import Patch
+    legend = [
+        Patch(fc="#888", alpha=0.45, label="Baseline (confidence)"),
+        Patch(fc="#888", alpha=0.75, label="HAS (confidence)"),
+        Patch(fc="#888", alpha=1.00, hatch="///",
+              label="HAS (angular margin) — proposed"),
+    ]
+    ax.legend(handles=legend, loc="upper right", fontsize=9)
+    plt.tight_layout()
+    _save(fig, "fig1_drift_taxonomy.png")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 2 — HAS geometric scatter (the 4-quadrant view)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_has_geometry(df_has, data_thresh, margin_thresh):
+    """Scatter: data_drift_score × has_margin, coloured by has_drift_type_margin.
+
+    Threshold lines create 4 quadrants:
+      Top-left    = In-Distribution     (low distance, high margin)
+      Top-right   = Pure Data Drift     (high distance, high margin)
+      Bottom-left = Pure Concept Drift  (low distance, low margin)
+      Bottom-right= Full Drift (both)   (high distance, low margin)
+
+    This is the core geometric argument of the paper: data drift and concept
+    drift are orthogonal dimensions in the HAS feature space.  Softmax
+    confidence conflates them; margin and centroid distance separate them.
+    """
+    if "has_margin" not in df_has.columns or "data_drift_score" not in df_has.columns:
+        print("  ⚠ Skipping Fig 2 — has_margin or data_drift_score missing from df_has.")
         return
 
-    # Build matrix: NaN = missing, value = KS stat
-    matrix = np.full((n_cls, n_sub), np.nan)
-    for r, cls in enumerate(classes):
-        cls_info = hier_results.get(cls, {})
-        for c, sub in enumerate(all_subs):
-            sub_data = cls_info.get("subclasses", {}).get(sub)
-            if sub_data is not None:
-                matrix[r, c] = sub_data["ks_stat"]
+    fig, ax = plt.subplots(figsize=(9, 7))
 
-    fig, ax = plt.subplots(figsize=(max(10, n_sub * 0.7 + 2), max(4, n_cls * 0.9 + 2)))
+    for dtype, color in [
+        ("In-Distribution",    "#2ecc71"),
+        ("Pure Data Drift",    "#3498db"),
+        ("Pure Concept Drift", "#e74c3c"),
+        ("Full Drift (both)",  "#8e44ad"),
+    ]:
+        mask = df_has["has_drift_type_margin"] == dtype
+        if mask.any():
+            ax.scatter(
+                df_has.loc[mask, "data_drift_score"],
+                df_has.loc[mask, "has_margin"],
+                c=color, label=dtype, alpha=0.55, s=18,
+                edgecolors="none", rasterized=True
+            )
 
-    # Grey background for missing cells
-    bg = np.where(np.isnan(matrix), 1.0, np.nan)
-    ax.imshow(bg, aspect="auto", cmap="Greys", vmin=0, vmax=1,
-              interpolation="nearest")
+    # Threshold lines
+    ax.axvline(data_thresh,   color="#333", linestyle="--", lw=1.2,
+               label=f"Data drift threshold ({data_thresh:.3f})")
+    ax.axhline(margin_thresh, color="#c0392b", linestyle="--", lw=1.2,
+               label=f"Margin threshold ({margin_thresh:.3f})")
 
-    # Red heatmap for present cells
-    masked = np.ma.masked_where(np.isnan(matrix), matrix)
-    im = ax.imshow(masked, aspect="auto", cmap="Reds", vmin=0.0, vmax=1.0,
-                   interpolation="nearest")
+    # Quadrant labels
+    xlim = ax.get_xlim(); ylim = ax.get_ylim()
+    xmid = (xlim[0] + data_thresh) / 2
+    xmid2 = (data_thresh + xlim[1]) / 2
+    ymid_hi = (margin_thresh + ylim[1]) / 2
+    ymid_lo = (ylim[0] + margin_thresh) / 2
 
-    # Class-level drift border: bold outline on rows where class_drifted=True
-    for r, cls in enumerate(classes):
-        if hier_results.get(cls, {}).get("class_drifted", False):
-            for spine_pos in [r - 0.5, r + 0.5]:
-                ax.axhline(spine_pos, color="#8e44ad", linewidth=2.0, alpha=0.9)
+    for xp, yp, label, col in [
+        (xmid,  ymid_hi, "In-Distribution",    "#27ae60"),
+        (xmid2, ymid_hi, "Pure\nData Drift",   "#2980b9"),
+        (xmid,  ymid_lo, "Pure\nConcept Drift","#c0392b"),
+        (xmid2, ymid_lo, "Full Drift\n(both)", "#7d3c98"),
+    ]:
+        ax.text(xp, yp, label, ha="center", va="center",
+                fontsize=8, color=col, alpha=0.6,
+                fontweight="bold")
 
-    ax.set_yticks(range(n_cls))
-    ax.set_yticklabels(classes, fontsize=10)
-    ax.set_xticks(range(n_sub))
-    ax.set_xticklabels(all_subs, rotation=45, ha="right", fontsize=8)
-    ax.set_title(f"Hierarchical Drift Heatmap — {model_tag}\n"
-                 f"(KS statistic; purple outlines = class drifted; grey = absent)",
-                 fontsize=11, fontweight="bold")
+    ax.set_xlabel("Data Drift Score  (latent distance from training centroid)")
+    ax.set_ylabel("HAS Angular Margin  (cos_best − cos_second_best)\n"
+                  "← More concept-drifted       Less concept-drifted →",
+                  labelpad=8)
+    ax.set_title("Figure 2 — HAS Geometric View: Data Drift vs Concept Drift\n"
+                 "Each point = one custom image. "
+                 "Threshold lines define the 4-quadrant taxonomy.",
+                 fontweight="bold")
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+    plt.tight_layout()
+    _save(fig, "fig2_has_geometry.png")
 
-    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
-    cbar.set_label("KS Statistic", fontsize=9)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure 3 — Concept drift direction per class
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_concept_drift_direction(df_has):
+    """For each true class, show where concept-drifted samples are heading.
+
+    Only includes samples flagged as concept-drifted by the margin signal
+    (has_margin_drifted=True).  X-axis = true class, stacked/grouped bars
+    = destination class (predicted_drift_toward).
+
+    Directly answers: "For Mountain images that are concept-drifted,
+    what fraction are heading toward Glacier vs Forest vs Coast?"
+    """
+    concept_df = df_has[df_has["has_margin_drifted"]].copy()
+
+    if len(concept_df) == 0:
+        print("  ⚠ Skipping Fig 3 — no concept-drifted samples.")
+        print("    Re-train with more epochs for meaningful margin signal.")
+        return
+
+    # Cross-tab: true_class × predicted_drift_toward (fraction)
+    xtab = pd.crosstab(
+        concept_df["true_class"],
+        concept_df["predicted_drift_toward"],
+        normalize="index"
+    ) * 100
+
+    # Keep only classes that appear
+    present_true  = [c for c in LANDSCAPE_CLASSES if c in xtab.index]
+    present_dest  = [c for c in LANDSCAPE_CLASSES if c in xtab.columns]
+
+    if not present_true or not present_dest:
+        print("  ⚠ Skipping Fig 3 — insufficient data for direction plot.")
+        return
+
+    xtab = xtab.reindex(index=present_true, columns=present_dest, fill_value=0)
+
+    x   = np.arange(len(present_true))
+    w   = 0.8 / len(present_dest)
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for j, dest in enumerate(present_dest):
+        vals = [xtab.loc[tc, dest] if tc in xtab.index else 0
+                for tc in present_true]
+        bars = ax.bar(x + (j - len(present_dest)/2 + 0.5) * w,
+                      vals, w,
+                      color=CLASS_COLORS.get(dest, "#999"),
+                      alpha=0.85, label=dest,
+                      edgecolor="white", linewidth=0.6)
+        for bar, val in zip(bars, vals):
+            if val > 3:
+                ax.text(bar.get_x() + bar.get_width()/2,
+                        val + 0.5, f"{val:.0f}%",
+                        ha="center", va="bottom", fontsize=7)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(present_true, fontsize=10)
+    ax.set_xlabel("True Class (origin of concept-drifted samples)")
+    ax.set_ylabel("% of concept-drifted samples per true class\n"
+                  "heading toward each boundary")
+    ax.set_title("Figure 3 — Concept Drift Direction per Class (HAS)\n"
+                 "Bar colour = destination boundary class  "
+                 "|  Only margin-drifted samples included",
+                 fontweight="bold")
+    ax.set_ylim(0, ax.get_ylim()[1] * 1.18)
+    ax.legend(title="Predicted drift toward", fontsize=9,
+              loc="upper right", title_fontsize=9)
+
+    # Annotate counts
+    counts = concept_df["true_class"].value_counts()
+    for i, tc in enumerate(present_true):
+        n = counts.get(tc, 0)
+        ax.text(x[i], -4.5, f"n={n}", ha="center", fontsize=8, color="#555")
 
     plt.tight_layout()
-    fname = f"hierarchical_drift_{model_tag.lower().replace(' ', '_')}.png"
-    path = os.path.join(RESULT_DIR, fname)
-    fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)
-    print(f"  ✓ {path}")
+    _save(fig, "fig3_concept_drift_direction.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -436,104 +270,42 @@ def plot_hierarchical_drift(hier_results, model_tag):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Step 4: Visualize")
-    parser.add_argument("--skip-umap", action="store_true",
-                        help="Skip UMAP (saves time on large datasets)")
+    parser = argparse.ArgumentParser()
     args = parser.parse_args()
-
     ensure_dirs()
-    meta = load_meta()
-    train_classes  = meta["train_classes"]
-    custom_classes = meta["custom_classes"]
 
-    # Load features
-    print("Loading features …")
-    bl_train   = load_npz("bl_train")
-    bl_custom  = load_npz("bl_custom")
-    has_train  = load_npz("has_train")
-    has_custom = load_npz("has_custom")
+    print("Loading CSVs …")
+    df_bl  = _load_csv("drift_baseline.csv")
+    df_has = _load_csv("drift_has.csv")
 
-    # Load drift CSVs
-    df_bl  = load_csv("drift_baseline")
-    df_has = load_csv("drift_has")
+    # Check that detect.py was run with the updated version
+    if "has_drift_type_margin" not in df_has.columns:
+        sys.exit("ERROR: has_drift_type_margin column missing. "
+                 "Re-run detect.py with the updated version.")
 
-    # ── UMAP ──
-    if not args.skip_umap:
-        print("\nComputing UMAP (baseline) …")
-        emb_ref_bl, emb_cur_bl = compute_umap(bl_train["latents"],
-                                               bl_custom["latents"])
-        print("Computing UMAP (HAS) …")
-        emb_ref_has, emb_cur_has = compute_umap(has_train["latents"],
-                                                 has_custom["latents"])
+    # Load thresholds from population tests CSV to draw lines on Fig 2
+    pop_df = _load_csv("population_tests.csv")
+    # We need data_thresh and margin_thresh — these aren't in population_tests,
+    # so we recompute from the df itself as approximate reference lines.
+    data_thresh   = df_has.loc[df_has["data_drifted"],   "data_drift_score"].min() \
+                    if df_has["data_drifted"].any() else df_has["data_drift_score"].quantile(0.90)
+    margin_thresh = df_has.loc[df_has["has_margin_drifted"], "has_margin"].max() \
+                    if df_has["has_margin_drifted"].any() else df_has["has_margin"].quantile(0.10)
 
-        drift_bl  = df_bl["drift_type"].values
-        drift_has = df_has["drift_type"].values
+    print("\nFigure 1: drift taxonomy comparison …")
+    plot_taxonomy(df_bl, df_has)
 
-        plot_single_umap(emb_ref_bl, emb_cur_bl,
-                         bl_train["labels"], drift_bl,
-                         train_classes, "UMAP — Baseline (no HAS)",
-                         "umap_baseline.png")
-        plot_single_umap(emb_ref_has, emb_cur_has,
-                         has_train["labels"], drift_has,
-                         train_classes, "UMAP — HAS Model",
-                         "umap_has.png")
-        plot_side_by_side(emb_ref_bl, emb_cur_bl,
-                          bl_train["labels"], drift_bl,
-                          emb_ref_has, emb_cur_has,
-                          has_train["labels"], drift_has,
-                          train_classes)
-    else:
-        print("\nSkipping UMAP (--skip-umap).")
+    print("Figure 2: HAS geometric scatter (4-quadrant view) …")
+    plot_has_geometry(df_has, data_thresh, margin_thresh)
 
-    # ── Dashboards ──
-    print("\nGenerating dashboards …")
-    plot_dashboard(df_bl, "Baseline")
-    plot_dashboard(df_has, "HAS Model")
+    print("Figure 3: concept drift direction per class …")
+    plot_concept_drift_direction(df_has)
 
-    # ── Per-feature KS ──
-    print("\nPer-feature KS plots …")
-    plot_per_feature_ks_chart(bl_train["latents"], bl_custom["latents"], "Baseline")
-    plot_per_feature_ks_chart(has_train["latents"], has_custom["latents"], "HAS Model")
-
-    # ADDITION 1 — HAS margin analysis
-    print("\nHAS margin analysis …")
-    plot_margin_analysis(
-        df_has,
-        has_train["margins"],
-        has_custom["margins"],
-        tag="HAS Model",
-    )
-
-    # ADDITION 1 — Drift direction matrix heatmap
-    # This is the plot that directly answers "Mountain → Glacier?"
-    # Rows = true class (origin of drift), Columns = closest boundary (destination).
-    print("\nHAS drift direction matrix …")
-    import numpy as _np
-    from drift_stats import has_drift_direction_matrix as _ddm
-    dir_mat, _ = _ddm(
-        has_custom["latents"].__class__(has_custom["labels"]),  # reuse loaded array
-        has_custom["closest_boundary"],
-        meta["train_classes"], normalise=True)
-    plot_direction_matrix(
-        dir_mat, meta["train_classes"],
-        "HAS Drift Direction Matrix — Custom Set\n"
-        "(off-diagonal = fraction drifting toward that boundary)",
-        "has_drift_direction_matrix.png"
-    )
-
-    # ADDITION 2 — Hierarchical drift heatmaps
-    hier_path = os.path.join(RESULT_DIR, "hierarchical_drift.json")
-    if os.path.exists(hier_path):
-        print("\nHierarchical drift heatmaps …")
-        with open(hier_path) as f:
-            hier_data = json.load(f)
-        plot_hierarchical_drift(hier_data.get("baseline", {}), "baseline")
-        plot_hierarchical_drift(hier_data.get("has", {}),      "has")
-    else:
-        print(f"\n  ⚠ {hier_path} not found — skipping hierarchical heatmaps.")
-        print("    Run step3_detect.py first.")
-
-    print("\nStep 4 complete.")
+    print("\nOutputs:")
+    for f in ["fig1_drift_taxonomy.png",
+              "fig2_has_geometry.png",
+              "fig3_concept_drift_direction.png"]:
+        print(f"  results/{f}")
 
 
 if __name__ == "__main__":
