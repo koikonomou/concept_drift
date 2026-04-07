@@ -1,7 +1,7 @@
 import os, sys, json, argparse, io, contextlib
 import numpy as np
 import pandas as pd
-
+import warnings
 from config import (WEIGHT_DIR, FEATURE_DIR, RESULT_DIR,
                     DRIFT_SIGMA, HAS_MARGIN_SIGMA, LANDSCAPE_CLASSES,
                     ensure_dirs)
@@ -114,7 +114,6 @@ def build_has_df(custom, train_stats, class_names, drift_sigma, margin_sigma):
     if "margin_mean" in train_stats and "margin_std" in train_stats:
         tm, ts = train_stats["margin_mean"], train_stats["margin_std"]
     else:
-        import warnings
         warnings.warn("margin_mean missing — re-run extract.py")
         tm = float(np.mean(custom["margins"]))
         ts = float(np.std(custom["margins"]))
