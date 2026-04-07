@@ -358,18 +358,47 @@ def main():
     save_csv(pd.DataFrame(direction_rows), "concept_drift_direction.csv")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TABLE 4 — Direction matrices (training vs custom)
+    # TABLE 4 — Direction matrices (training vs custom, all vs drifted-only)
+    # Three views make Table 3 and Table 4 directly comparable:
+    #   (A) Training set          — boundary structure before any drift
+    #   (B) Custom set, all       — boundary structure after drift (diluted)
+    #   (C) Custom set, drifted-only — matches Table 3 scope; pure drift signal
     # ══════════════════════════════════════════════════════════════════════════
     _sep(); print("TABLE 4 — HAS DRIFT DIRECTION MATRICES"); _sep()
+    print("  (A) Training set  |  (B) Custom — all samples  "
+          "|  (C) Custom — concept-drifted only\n")
 
     dir_train,  _ = has_drift_direction_matrix(
         ht["labels"], ht["closest_boundary"], LANDSCAPE_CLASSES)
     dir_custom, _ = has_drift_direction_matrix(
         hc["labels"], hc["closest_boundary"], LANDSCAPE_CLASSES)
 
-    for mat, label in [(dir_train, "Training Set"), (dir_custom, "Custom Set")]:
+    # (C) restrict to concept-drifted custom samples — same filter as Table 3
+    drifted_mask = df_has["has_margin_drifted"].values
+    n_drifted    = drifted_mask.sum()
+    if n_drifted > 0:
+        dir_custom_drifted, _ = has_drift_direction_matrix(
+            hc["labels"][drifted_mask],
+            hc["closest_boundary"][drifted_mask],
+            LANDSCAPE_CLASSES)
+    else:
+        dir_custom_drifted = None
+
+    matrices = [
+        (dir_train,         "Training Set (A)"),
+        (dir_custom,        "Custom Set — all samples (B)"),
+    ]
+    if dir_custom_drifted is not None:
+        matrices.append(
+            (dir_custom_drifted,
+             f"Custom Set — concept-drifted only (C)  [{n_drifted} samples]"))
+    else:
+        print("  (C) No concept-drifted samples — skipping drifted-only matrix.\n")
+
+    for mat, label in matrices:
         n = len(LANDSCAPE_CLASSES)
-        print(f"\n  {label}  (row=origin, col=destination, diagonal=self)")
+        print(f"\n  {label}")
+        print(f"  (row=origin, col=destination, diagonal=self)")
         header = f"  {'':14}" + "".join(f"{c:>12}" for c in LANDSCAPE_CLASSES)
         print(header)
         print("  " + "-" * len(header.rstrip()))
@@ -385,9 +414,15 @@ def main():
             print(row)
     print()
 
-    # Save both matrices as CSVs
-    for mat, name in [(dir_train, "direction_matrix_train.csv"),
-                      (dir_custom, "direction_matrix_custom.csv")]:
+    # Save all three matrices as CSVs
+    to_save = [
+        (dir_train,  "direction_matrix_train.csv"),
+        (dir_custom, "direction_matrix_custom.csv"),
+    ]
+    if dir_custom_drifted is not None:
+        to_save.append(
+            (dir_custom_drifted, "direction_matrix_custom_drifted.csv"))
+    for mat, name in to_save:
         df_mat = pd.DataFrame(mat, index=LANDSCAPE_CLASSES, columns=LANDSCAPE_CLASSES)
         df_mat.index.name = "true_class"
         save_csv(df_mat.reset_index(), name)

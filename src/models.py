@@ -67,13 +67,10 @@ class FolderDataset(Dataset):
         self.class_names = []
 
         if not os.path.isdir(root_dir):
-            print(f"  ⚠ Dataset root does not exist: {root_dir}")
+            print(f"Dataset root does not exist: {root_dir}")
             return
 
-        all_dirs = sorted(
-            d for d in os.listdir(root_dir)
-            if os.path.isdir(os.path.join(root_dir, d))
-        )
+        all_dirs = sorted(d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d)))
 
         # ── Build folder→label mapping ──
         if class_map is not None:
@@ -88,7 +85,7 @@ class FolderDataset(Dataset):
                     if folder.lower() in lower_map:
                         folder_to_label[lower_map[folder.lower()]] = label_idx
                     else:
-                        print(f"  ⚠ '{folder}' not found in {root_dir}")
+                        print(f"'{folder}' not found in {root_dir}")
             self.class_names = list(folder_to_label.keys())
 
         elif class_names is not None:
@@ -100,7 +97,7 @@ class FolderDataset(Dataset):
                 elif cn.lower() in lower_map:
                     folder_to_label[lower_map[cn.lower()]] = idx
             if not folder_to_label:
-                print(f"  ⚠ None of {class_names} found — auto-discovering")
+                print(f"None of {class_names} found — auto-discovering")
                 folder_to_label = {d: i for i, d in enumerate(all_dirs)}
             self.class_names = list(folder_to_label.keys())
 
@@ -118,18 +115,16 @@ class FolderDataset(Dataset):
                     for img in os.listdir(entry_path):
                         if img.lower().endswith(("png", "jpg", "jpeg")):
                             self.samples.append(
-                                dict(path=os.path.join(entry_path, img),
-                                     label=label_idx, sub=entry))
+                                dict(path=os.path.join(entry_path, img), label=label_idx, sub=entry))
                             count += 1
                 elif entry.lower().endswith(("png", "jpg", "jpeg")):
                     self.samples.append(
                         dict(path=entry_path, label=label_idx, sub=folder))
                     count += 1
             if count == 0:
-                print(f"  ⚠ '{folder}' folder exists but contains 0 images")
+                print(f"'{folder}' folder exists but contains 0 images")
 
-        print(f"  FolderDataset: {len(self.samples)} images, "
-              f"{len(self.class_names)} classes {self.class_names}")
+        print(f"FolderDataset: {len(self.samples)} images, "f"{len(self.class_names)} classes {self.class_names}")
 
     def __len__(self):
         return len(self.samples)
@@ -169,7 +164,7 @@ class Embedder64(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HASeparator — Multi-class (faithful to the paper)
+# HASeparator — Multi-class
 # ─────────────────────────────────────────────────────────────────────────────
 class HASeparatorMultiClass(nn.Module):
     def __init__(self, num_classes: int, feat_dim: int = 64,
@@ -197,16 +192,16 @@ class HASeparatorMultiClass(nn.Module):
             dw = gr_w - temp
             normed_dw = F.normalize(dw, p=2, dim=1)
             win = torch.einsum('bd,bdc->bc', normed_embds, normed_dw)
-            penalties = self.margin - torch.clamp(win, max=self.margin)  # (B, C) raw -- matches original
+            penalties = self.margin - torch.clamp(win, max=self.margin)  # (B, C) raw
 
-        return logits, penalties  # matches original signature: (logits, penalties)
+        return logits, penalties
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ResNet50 backbone
 # ─────────────────────────────────────────────────────────────────────────────
 def _resnet50_backbone():
-    resnet = models.resnet50(weights=None)   # train from scratch — matches original paper
+    resnet = models.resnet50(weights=None)   # train from scratch
     stem = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
     return stem, resnet.layer1, resnet.layer2, resnet.layer3, resnet.layer4
 
@@ -235,7 +230,7 @@ class BaselineModel(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. HAS model (multi-class HAS — faithful to the paper)
+# 2. HAS model (multi-class HAS)
 # ─────────────────────────────────────────────────────────────────────────────
 class HASModel(nn.Module):
     def __init__(self, n_classes=5, margin=0.1, scale=1.0, dropout=0.3):
@@ -243,8 +238,7 @@ class HASModel(nn.Module):
         self.n_classes = n_classes
         self.stem, self.l1, self.l2, self.l3, self.l4 = _resnet50_backbone()
         self.embedder = Embedder64(2048, 64, dropout)
-        self.has_layer = HASeparatorMultiClass(
-            num_classes=n_classes, feat_dim=64, margin=margin, scale=scale)
+        self.has_layer = HASeparatorMultiClass(num_classes=n_classes, feat_dim=64, margin=margin, scale=scale)
 
     def forward(self, x, labels=None):
         x  = self.stem(x)

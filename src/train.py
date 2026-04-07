@@ -19,8 +19,10 @@ Fine-tuning (--finetune):
 Usage:
     python train.py                        # train both, evaluate on test
     python train.py --only has             # train HAS only
-    python train.py --finetune             # train + fine-tune
+    python train.py --finetune             # train + fine-tune (random strategy)
     python train.py --skip-train --finetune  # fine-tune existing weights only
+    python train.py --finetune --ft-strategy drift-ranked --ft-top-pct 0.5
+                                           # fine-tune on top 50% subfolders by drift severity
     nohup python train.py --finetune > logs/train.log 2>&1 &
 """
 
@@ -97,8 +99,7 @@ def evaluate(model, loader, model_type="baseline"):
 
 
 def make_loader(root, class_names=None, class_map=None):
-    ds = FolderDataset(root, class_names=class_names,
-                       class_map=class_map, transform=STANDARD_TRANSFORM)
+    ds = FolderDataset(root, class_names=class_names, class_map=class_map, transform=STANDARD_TRANSFORM)
     if len(ds) == 0:
         return None, 0
     return DataLoader(ds, batch_size=64, shuffle=False, num_workers=4), len(ds)
@@ -106,7 +107,7 @@ def make_loader(root, class_names=None, class_map=None):
 
 def print_test_acc(model, model_type, label):
     if not os.path.isdir(TEST_ROOT):
-        print(f"  ⚠ TEST_ROOT not found — skipping test evaluation")
+        print(f"TEST_ROOT not found, skipping test evaluation")
         return None
     loader, n = make_loader(TEST_ROOT, class_names=LANDSCAPE_CLASSES)
     if loader is None:
@@ -128,13 +129,11 @@ def train_baseline(epochs, lr):
     print("=" * 60)
 
     dataset = ImageFolder(root=TRAIN_ROOT, transform=TRAIN_AUGMENT)
-    loader  = DataLoader(dataset, batch_size=BATCH_SIZE,
-                         shuffle=True, num_workers=4)
+    loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     print(f"  Train samples: {len(dataset)}  |  Classes: {dataset.classes}")
 
     model = BaselineModel(n_classes=len(dataset.classes)).to(DEVICE)
-    opt   = torch.optim.SGD(model.parameters(), lr=lr,
-                             momentum=0.9, nesterov=True, weight_decay=1e-4)
+    opt   = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, nesterov=True, weight_decay=1e-4)
     milestones = [int(epochs * 0.6), int(epochs * 0.8)]
     scheduler  = torch.optim.lr_scheduler.MultiStepLR(opt, milestones, gamma=0.1)
     ce         = nn.CrossEntropyLoss()
@@ -161,7 +160,7 @@ def train_baseline(epochs, lr):
 
     path = os.path.join(WEIGHT_DIR, "baseline.pth")
     torch.save(model.state_dict(), path)
-    print(f"  ✓ Saved → {path}")
+    print(f"Saved → {path}")
     print_test_acc(model, "baseline", "BASELINE")
     return model
 
@@ -172,19 +171,15 @@ def train_has(epochs, lr):
     print("=" * 60)
 
     dataset = ImageFolder(root=TRAIN_ROOT, transform=TRAIN_AUGMENT)
-    loader  = DataLoader(dataset, batch_size=BATCH_SIZE,
-                         shuffle=True, num_workers=4)
+    loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     print(f"  Train samples: {len(dataset)}  |  Classes: {dataset.classes}")
 
-    model = HASModel(n_classes=len(dataset.classes),
-                     margin=HAS_MARGIN, scale=HAS_SCALE).to(DEVICE)
-    opt   = torch.optim.SGD(model.parameters(), lr=lr,
-                             momentum=0.9, nesterov=True, weight_decay=1e-4)
+    model = HASModel(n_classes=len(dataset.classes),margin=HAS_MARGIN, scale=HAS_SCALE).to(DEVICE)
+    opt   = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, nesterov=True, weight_decay=1e-4)
     milestones = [int(epochs * 0.6), int(epochs * 0.8)]
     scheduler  = torch.optim.lr_scheduler.MultiStepLR(opt, milestones, gamma=0.1)
     nll        = nn.NLLLoss()
-    print(f"  lr={lr}  |  Warmup={HAS_WARMUP_EPOCHS} epochs  |  "
-          f"BETA={BETA}  scale={HAS_SCALE}  |  LR drops at {milestones}")
+    print(f"  lr={lr}  |  Warmup={HAS_WARMUP_EPOCHS} epochs  |  " f"BETA={BETA}  scale={HAS_SCALE}  |  LR drops at {milestones}")
 
     for ep in range(1, epochs + 1):
         model.train()
@@ -220,7 +215,7 @@ def train_has(epochs, lr):
 
     path = os.path.join(WEIGHT_DIR, "has_model.pth")
     torch.save(model.state_dict(), path)
-    print(f"  ✓ Saved → {path}")
+    print(f"Saved → {path}")
     print_test_acc(model, "has", "HAS")
     return model
 
@@ -229,8 +224,51 @@ def train_has(epochs, lr):
 # Fine-tuning
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_finetune_dataset(csv_path, custom_root, drift_col):
-    """Select drift-approved custom samples and build a PathLabelDataset."""
+def _rank_subfolders_by_drift(df, drift_col):
+    """Return subfolders ranked by concept drift severity (descending).
+
+    Ranking score per (true_class, sub_category) group:
+      - fraction of samples that are concept-drifted or fully drifted
+      - mean concept_drift_score (1 - confidence) as tiebreaker
+    Both columns come from detect.py and are always present.
+    """
+    concept_drifted_types = {"Pure Concept Drift", "Full Drift (both)",
+                             "Concept Drift"}   # baseline label variant
+
+    df = df.copy()
+    df["_is_concept_drifted"] = df[drift_col].isin(concept_drifted_types)
+
+    grp = df.groupby(["true_class", "sub_category"]).agg(
+        drift_rate  = ("_is_concept_drifted", "mean"),
+        drift_score = ("concept_drift_score",  "mean"),
+        n_samples   = ("_is_concept_drifted",  "count"),
+    ).reset_index()
+
+    # dominant drift target — available in HAS CSV as predicted_drift_toward
+    if "predicted_drift_toward" in df.columns:
+        dom = (df[df["predicted_drift_toward"] != "—"]
+               .groupby(["true_class", "sub_category"])["predicted_drift_toward"]
+               .agg(lambda x: x.value_counts().index[0] if len(x) else "—")
+               .reset_index(name="dominant_target"))
+        grp = grp.merge(dom, on=["true_class", "sub_category"], how="left")
+        grp["dominant_target"] = grp["dominant_target"].fillna("—")
+    else:
+        grp["dominant_target"] = "—"
+
+    grp = grp.sort_values(["drift_rate", "drift_score"], ascending=False)
+    return grp
+
+
+def _build_finetune_dataset(csv_path, custom_root, drift_col,
+                             strategy="random", top_pct=1.0):
+    """Select drift-approved custom samples and return (paths, labels).
+
+    strategy:
+        "random"       — all FINETUNE_SELECT samples, random split (original)
+        "drift-ranked" — restrict to the top `top_pct` fraction of subfolders
+                         ranked by concept drift severity, then split
+    top_pct: fraction of subfolders to keep when strategy="drift-ranked" (0-1)
+    """
     if not os.path.exists(csv_path):
         print(f"  ⚠ {csv_path} not found — run detect.py first")
         return None
@@ -240,6 +278,26 @@ def _build_finetune_dataset(csv_path, custom_root, drift_col):
         print(f"  ⚠ Column '{drift_col}' missing — re-run detect.py")
         return None
 
+    # ── Subfolder ranking (drift-ranked strategy) ──────────────────────────
+    if strategy == "drift-ranked":
+        ranked = _rank_subfolders_by_drift(df, drift_col)
+        n_keep = max(1, int(np.ceil(top_pct * len(ranked))))
+        kept   = ranked.head(n_keep)
+        print(f"  Drift-ranked: keeping top {top_pct*100:.0f}% = "
+              f"{n_keep}/{len(ranked)} subfolders")
+        print(f"  {'Subfolder':<30} {'Class':<14} {'DriftRate':>10} "
+              f"{'Score':>8} {'→ Target'}")
+        print("  " + "-" * 70)
+        for _, r in kept.iterrows():
+            print(f"  {r['sub_category']:<30} {r['true_class']:<14} "
+                  f"{r['drift_rate']:>9.1%} {r['drift_score']:>8.4f} "
+                  f"  → {r['dominant_target']}")
+        print()
+        keep_set = set(zip(kept["true_class"], kept["sub_category"]))
+        df = df[df.apply(
+            lambda r: (r["true_class"], r["sub_category"]) in keep_set, axis=1)]
+
+    # ── FINETUNE_SELECT filter (always applied) ────────────────────────────
     selected = df[df[drift_col].isin(FINETUNE_SELECT)]
     total    = len(df)
     print(f"  Selected {len(selected)}/{total} samples ({len(selected)/total*100:.1f}%)")
@@ -258,7 +316,6 @@ def _build_finetune_dataset(csv_path, custom_root, drift_col):
         lbl = cls_to_idx.get(row["true_class"], -1)
         if lbl < 0:
             continue
-        # Find the custom folder that maps to this class
         sub = row["sub_category"]
         for folder, idx in CUSTOM_CLASS_MAP.items():
             if idx == lbl:
@@ -275,14 +332,17 @@ def _build_finetune_dataset(csv_path, custom_root, drift_col):
         return None
 
     print(f"  Built fine-tune dataset: {len(paths)} images")
-    return PathLabelDataset(paths, labels, transform=TRAIN_AUGMENT)
+    return paths, labels
 
 
-def finetune(ft_epochs=FINETUNE_EPOCHS, ft_lr=FINETUNE_LR):
+def finetune(ft_epochs=FINETUNE_EPOCHS, ft_lr=FINETUNE_LR,
+             strategy="random", top_pct=1.0):
     print("\n" + "=" * 60)
     print("FINE-TUNING ON DRIFT-SELECTED CUSTOM SAMPLES")
     print("=" * 60)
     print(f"  Selection criteria : {FINETUNE_SELECT}")
+    print(f"  Strategy           : {strategy}"
+          + (f"  (top {top_pct*100:.0f}% subfolders by drift)" if strategy == "drift-ranked" else ""))
     print(f"  Fine-tune epochs   : {ft_epochs}")
     print(f"  Fine-tune LR       : {ft_lr}  (training LR was {LR})\n")
 
@@ -301,12 +361,12 @@ def finetune(ft_epochs=FINETUNE_EPOCHS, ft_lr=FINETUNE_LR):
     bl.load_state_dict(torch.load(bl_path,  map_location=DEVICE))
     has.load_state_dict(torch.load(has_path, map_location=DEVICE))
 
-    # Full custom set loader for evaluation (STANDARD_TRANSFORM, no augment)
+    # Full custom set loader — used only as fallback when no drift samples pass the filter
     custom_loader, n_custom = make_loader(custom_root, class_map=CUSTOM_CLASS_MAP)
     if custom_loader is None:
         print("  ⚠ Custom dataset not found")
         return
-    print(f"  Custom set: {n_custom} images (evaluation set)\n")
+    print(f"  Custom set: {n_custom} images total\n")
 
     results = {}
     ce  = nn.CrossEntropyLoss()
@@ -318,20 +378,46 @@ def finetune(ft_epochs=FINETUNE_EPOCHS, ft_lr=FINETUNE_LR):
     ]:
         print(f"  ─── {tag} ────────────────────────────────────────")
 
-        # Accuracy BEFORE fine-tuning on the custom set
-        acc_before = evaluate(model, custom_loader, model_type)
-        print(f"  Custom-set accuracy BEFORE fine-tuning: {acc_before:.2f}%")
+        # Build fine-tune dataset (returns paths + labels, not yet a Dataset)
+        result = _build_finetune_dataset(
+            os.path.join(RESULT_DIR, csv_name), custom_root, drift_col,
+            strategy=strategy, top_pct=top_pct)
 
-        # Build fine-tune dataset
-        ft_ds = _build_finetune_dataset(
-            os.path.join(RESULT_DIR, csv_name), custom_root, drift_col)
-
-        if ft_ds is None or len(ft_ds) == 0:
+        if result is None:
             print(f"  Skipping fine-tuning for {tag}\n")
+            acc_before = evaluate(model, custom_loader, model_type)
+            print(f"  Custom-set accuracy (full set): {acc_before:.2f}%")
             results[tag] = dict(before=acc_before, after=acc_before)
             continue
 
-        ft_loader = DataLoader(ft_ds, batch_size=min(BATCH_SIZE, len(ft_ds)),
+        all_paths, all_labels = result
+
+        # 80/20 train/test split — evaluate only on the held-out test portion
+        idx      = np.random.permutation(len(all_paths))
+        split    = max(1, int(0.8 * len(idx)))
+        tr_idx   = idx[:split]
+        te_idx   = idx[split:]
+
+        ft_train_ds = PathLabelDataset(
+            [all_paths[i] for i in tr_idx],
+            [all_labels[i] for i in tr_idx],
+            transform=TRAIN_AUGMENT)
+        ft_test_ds  = PathLabelDataset(
+            [all_paths[i] for i in te_idx],
+            [all_labels[i] for i in te_idx],
+            transform=STANDARD_TRANSFORM)
+
+        ft_test_loader = DataLoader(ft_test_ds, batch_size=64, shuffle=False,
+                                    num_workers=4, drop_last=False)
+
+        print(f"  Train split: {len(ft_train_ds)} images | "
+              f"Test split (held-out): {len(ft_test_ds)} images")
+
+        # Accuracy BEFORE fine-tuning — measured on held-out test split only
+        acc_before = evaluate(model, ft_test_loader, model_type)
+        print(f"  Held-out accuracy BEFORE fine-tuning: {acc_before:.2f}%")
+
+        ft_loader = DataLoader(ft_train_ds, batch_size=min(BATCH_SIZE, len(ft_train_ds)),
                                shuffle=True, num_workers=4, drop_last=False)
         opt = torch.optim.SGD(model.parameters(), lr=ft_lr,
                                momentum=0.9, weight_decay=1e-4)
@@ -352,13 +438,16 @@ def finetune(ft_epochs=FINETUNE_EPOCHS, ft_lr=FINETUNE_LR):
                 tot_loss += loss.item()
                 correct  += logits.argmax(1).eq(labels).sum().item()
                 total    += len(labels)
+            eval_acc = evaluate(model, ft_test_loader, model_type)
+            model.train()
             print(f"    FT Epoch {ep:2d}/{ft_epochs} | "
                   f"Loss {tot_loss/len(ft_loader):.4f} | "
-                  f"Train-Acc {100*correct/total:.1f}%")
+                  f"Train-Acc {100*correct/total:.1f}% | "
+                  f"Eval-Acc {eval_acc:.2f}%")
 
-        # Accuracy AFTER fine-tuning
-        acc_after = evaluate(model, custom_loader, model_type)
-        print(f"  Custom-set accuracy AFTER  fine-tuning: {acc_after:.2f}%")
+        # Accuracy AFTER fine-tuning — same held-out test split
+        acc_after = evaluate(model, ft_test_loader, model_type)
+        print(f"  Held-out accuracy AFTER  fine-tuning: {acc_after:.2f}%")
         results[tag] = dict(before=acc_before, after=acc_after)
 
         # Save fine-tuned weights separately (originals preserved)
@@ -400,13 +489,16 @@ def main():
     parser.add_argument("--lr",         type=float, default=LR)
     parser.add_argument("--has-lr",     type=float, default=HAS_LR)
     parser.add_argument("--only",       choices=["baseline", "has"])
-    parser.add_argument("--finetune",   action="store_true",
-                        help="Fine-tune on drift-selected custom samples "
-                             "after training (requires detect.py CSVs)")
-    parser.add_argument("--skip-train", action="store_true",
-                        help="Skip training, jump straight to fine-tuning")
-    parser.add_argument("--ft-epochs",  type=int,   default=FINETUNE_EPOCHS)
-    parser.add_argument("--ft-lr",      type=float, default=FINETUNE_LR)
+    parser.add_argument("--finetune",   action="store_true", help="Fine-tune on drift-selected custom samples after training (requires detect.py CSVs)")
+    parser.add_argument("--skip-train", action="store_true", help="Skip training, jump straight to fine-tuning")
+    parser.add_argument("--ft-epochs",   type=int,   default=FINETUNE_EPOCHS)
+    parser.add_argument("--ft-lr",       type=float, default=FINETUNE_LR)
+    parser.add_argument("--ft-strategy", choices=["random", "drift-ranked"],
+                        default="random",
+                        help="random: all eligible samples (default); "
+                             "drift-ranked: restrict to top subfolders by concept drift severity")
+    parser.add_argument("--ft-top-pct",  type=float, default=0.5,
+                        help="Fraction of subfolders to keep when --ft-strategy=drift-ranked (default 0.5)")
     args = parser.parse_args()
 
     ensure_dirs()
@@ -419,7 +511,8 @@ def main():
             train_has(args.epochs, args.has_lr)
 
     if args.finetune:
-        finetune(ft_epochs=args.ft_epochs, ft_lr=args.ft_lr)
+        finetune(ft_epochs=args.ft_epochs, ft_lr=args.ft_lr,
+                 strategy=args.ft_strategy, top_pct=args.ft_top_pct)
 
     print("\ntrain.py complete.")
 
