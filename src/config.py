@@ -1,9 +1,3 @@
-"""
-config.py — All paths, hyperparameters, and shared constants.
-
-Edit this file once for your setup. Every other script imports from here.
-"""
-
 import os
 import torch
 
@@ -110,5 +104,5 @@ def resolve_custom_root():
     """Return CUSTOM_ROOT if it exists, else TEST_ROOT."""
     if os.path.isdir(CUSTOM_ROOT):
         return CUSTOM_ROOT
-    print(f"  ⚠ CUSTOM_ROOT not found ({CUSTOM_ROOT}), falling back to TEST_ROOT")
+    print(f"  CUSTOM_ROOT not found ({CUSTOM_ROOT}), falling back to TEST_ROOT")
     return TEST_ROOT

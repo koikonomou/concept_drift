@@ -22,8 +22,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+
 from config import (TRAIN_ROOT, WEIGHT_DIR, FEATURE_DIR, DEVICE,
                     LANDSCAPE_CLASSES, CUSTOM_CLASS_MAP,
+                    HAS_MARGIN, HAS_SCALE,
                     ensure_dirs, resolve_custom_root)
 from models import (BaselineModel, HASModel, FolderDataset,
                     STANDARD_TRANSFORM)
@@ -61,10 +63,10 @@ def extract_baseline(model, loader):
 def extract_has(model, loader):
     model.eval()
     latents, preds, confs, labels_all, subs = [], [], [], [], []
-    # ADDITION 1 — lists for new margin-based drift signals
+    # Lists for new margin-based drift signals
     margins_all, closest_boundary_all = [], []
 
-    # ADDITION 1 — retrieve L2-normalised weight matrix once (shape [64, n_classes])
+    # Retrieve L2-normalised weight matrix once (shape [64, n_classes])
     normed_W = model.get_normed_weights()  # stays on the model's device
 
     for imgs, lbls, sub in loader:
@@ -125,27 +127,59 @@ def save_train_stats(latents, confs, tag):
     print(f"    Latent distance: μ={dists.mean():.4f}, σ={dists.std():.4f}")
     print(f"    Confidence:      μ={confs.mean():.4f}, σ={confs.std():.4f}")
 
-
-def save_train_stats_has(latents, confs, margins, tag):
-    """Extended train stats for HAS — includes margin distribution.
-
-    Saves margin_mean and margin_std into the same .npz so detect.py can
-    compute the margin threshold without holding the full margins array
-    in memory.  The raw margins array is already saved in has_train.npz.
-    """
+def save_train_stats_has(latents, confs, margins, labels, tag):
+# ── Overall centroid (kept for reference / Baseline compatibility) ──────
     centroid = latents.mean(axis=0)
-    dists = np.linalg.norm(latents - centroid, axis=1)
+    dists    = np.linalg.norm(latents - centroid, axis=1)
+
+    # ── Per-class sphere centroids (HAS-native data drift) ─────────────────
+    # For each class c: mean of all training embeddings of class c,
+    # then L2-normalised back onto the unit sphere.
+    # This is the geometrically correct reference point for HAS because:
+    #   - HAS embeds everything on S⁶³
+    #   - The overall centroid is INSIDE the sphere (not on it)
+    #   - The per-class sphere centroid is ON the sphere, in the class region
+    # Cosine distance from the predicted class centroid is scale-free and
+    # consistent with the spherical geometry HAS operates in.
+    n_classes = len(np.unique(labels))
+    class_centroids    = np.zeros((n_classes, latents.shape[1]), dtype=np.float32)
+    class_cos_dist_mean = np.zeros(n_classes, dtype=np.float32)
+    class_cos_dist_std  = np.zeros(n_classes, dtype=np.float32)
+
+    for c in range(n_classes):
+        mask = labels == c
+        if mask.sum() == 0:
+            continue
+        cls_lat = latents[mask]                          # (n_c, 64)
+        raw_centroid = cls_lat.mean(axis=0)              # (64,)
+        norm = np.linalg.norm(raw_centroid)
+        class_centroids[c] = raw_centroid / (norm + 1e-8)  # unit vector on S⁶³
+
+        # Cosine distance = 1 - cosine_similarity
+        # For unit vectors: cos_sim = dot product
+        cos_sims = cls_lat @ class_centroids[c]          # (n_c,)
+        cos_dists = 1.0 - cos_sims                       # (n_c,)
+        class_cos_dist_mean[c] = cos_dists.mean()
+        class_cos_dist_std[c]  = cos_dists.std()
+
     path = os.path.join(WEIGHT_DIR, f"{tag}_train_stats.npz")
-    np.savez(path, centroid=centroid,
-             dist_mean=dists.mean(),   dist_std=dists.std(),
-             conf_mean=confs.mean(),   conf_std=confs.std(),
-             # ADDITION 1 — margin stats for threshold computation in detect.py
-             margin_mean=margins.mean(), margin_std=margins.std())
+    np.savez(path,
+             centroid=centroid,
+             dist_mean=dists.mean(),    dist_std=dists.std(),
+             conf_mean=confs.mean(),    conf_std=confs.std(),
+             margin_mean=margins.mean(), margin_std=margins.std(),
+             # NEW — per-class sphere centroids for HAS data drift
+             class_centroids=class_centroids,
+             class_cos_dist_mean=class_cos_dist_mean,
+             class_cos_dist_std=class_cos_dist_std)
+
     print(f"  ✓ Train stats ({tag}) → {path}")
     print(f"    Latent distance: μ={dists.mean():.4f}, σ={dists.std():.4f}")
     print(f"    Confidence:      μ={confs.mean():.4f}, σ={confs.std():.4f}")
     print(f"    Margin:          μ={margins.mean():.4f}, σ={margins.std():.4f}")
-
+    for c in range(n_classes):
+        print(f"    Class {c} cos-dist: μ={class_cos_dist_mean[c]:.4f}, "
+              f"σ={class_cos_dist_std[c]:.4f}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
@@ -169,7 +203,7 @@ def main():
     baseline = BaselineModel().to(DEVICE)
     baseline.load_state_dict(torch.load(bl_path, map_location=DEVICE))
 
-    has_model = HASModel().to(DEVICE)
+    has_model = HASModel(margin=HAS_MARGIN, scale=HAS_SCALE).to(DEVICE)
     has_model.load_state_dict(torch.load(has_path, map_location=DEVICE))
     print("Models loaded.\n")
 
@@ -187,7 +221,7 @@ def main():
     save_train_stats(bl_train["latents"],  bl_train["confs"],  "baseline")
     # ADDITION 1 — use extended stats saver for HAS (includes margin_mean/std)
     save_train_stats_has(has_train["latents"], has_train["confs"],
-                         has_train["margins"], "has")
+                         has_train["margins"],  has_train["labels"], "has")
 
     # ── Custom data (only the 5 classes that map to training classes) ──
     print("\nExtracting custom features …")

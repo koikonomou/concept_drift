@@ -37,8 +37,12 @@ def load_train_stats(tag):
     if "margin_mean" in s:
         stats["margin_mean"] = float(s["margin_mean"])
         stats["margin_std"]  = float(s["margin_std"])
+    # Per-class sphere centroids — present only for HAS after the update
+    if "class_centroids" in s:
+        stats["class_centroids"]     = s["class_centroids"]      # (n_classes, 64)
+        stats["class_cos_dist_mean"] = s["class_cos_dist_mean"]  # (n_classes,)
+        stats["class_cos_dist_std"]  = s["class_cos_dist_std"]   # (n_classes,)
     return stats
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-image DataFrames
@@ -108,9 +112,63 @@ def build_has_df(custom, train_stats, class_names, drift_sigma, margin_sigma):
         predicted_drift_toward closest_boundary_class if concept-drifted,
                                else "—" — directly answers "toward which class?"
     """
-    df, data_thresh, concept_thresh = build_baseline_df(
-        custom, train_stats, class_names, drift_sigma)
+    if "class_centroids" in train_stats:
+        # ── HAS-native data drift: cosine distance from predicted class centroid ──
+        # This is geometrically consistent with HAS: everything is on S⁶³,
+        # the per-class centroid is on the sphere, cosine distance is scale-free.
+        # Threshold is per-class: each class has its own μ and σ of cosine distance.
+        class_centroids     = train_stats["class_centroids"]      # (n_classes, 64)
+        class_cos_dist_mean = train_stats["class_cos_dist_mean"]  # (n_classes,)
+        class_cos_dist_std  = train_stats["class_cos_dist_std"]   # (n_classes,)
+        concept_thresh = max(
+            train_stats["conf_mean"] - drift_sigma * train_stats["conf_std"], 0.0)
 
+        rows = []
+        for i in range(len(custom["latents"])):
+            z    = custom["latents"][i]          # unit vector (64,)
+            pred = int(custom["preds"][i])
+            conf = float(custom["confs"][i])
+            lbl  = int(custom["labels"][i])
+
+            # Cosine distance from predicted class centroid on sphere
+            if pred < len(class_centroids):
+                cc  = class_centroids[pred]
+                dd  = float(1.0 - np.dot(z, cc))           # cosine distance
+                mu  = float(class_cos_dist_mean[pred])
+                sig = float(class_cos_dist_std[pred])
+                data_thresh_i = mu + drift_sigma * sig
+            else:
+                dd            = 0.0
+                data_thresh_i = 1.0                          # never flag
+
+            d = dd   > data_thresh_i
+            c = conf < concept_thresh
+
+            if   not d and not c: dt = "In-Distribution"
+            elif     d and not c: dt = "Data Drift"
+            elif not d and     c: dt = "Concept Drift"
+            else:                 dt = "Full Drift (both)"
+
+            rows.append(dict(
+                sub_category        = str(custom["subs"][i]),
+                true_class          = (class_names[lbl]
+                                       if lbl < len(class_names) else str(lbl)),
+                pred_label          = pred,
+                correct             = lbl == pred,
+                max_confidence      = round(conf, 4),
+                data_drift_score    = round(dd, 4),   # cosine distance (sphere-consistent)
+                concept_drift_score = round(1.0 - conf, 4),
+                data_drifted        = d,
+                concept_drifted     = c,
+                drift_type          = dt,
+            ))
+        df            = pd.DataFrame(rows)
+        data_thresh   = None   # per-class — no single value to report
+        concept_thresh = concept_thresh
+    else:
+        # Fallback: old Euclidean centroid distance (extract.py not yet updated)
+        df, data_thresh, concept_thresh = build_baseline_df(
+            custom, train_stats, class_names, drift_sigma)
     if "margin_mean" in train_stats and "margin_std" in train_stats:
         tm, ts = train_stats["margin_mean"], train_stats["margin_std"]
     else:
@@ -118,7 +176,7 @@ def build_has_df(custom, train_stats, class_names, drift_sigma, margin_sigma):
         tm = float(np.mean(custom["margins"]))
         ts = float(np.std(custom["margins"]))
 
-    margin_thresh = tm - margin_sigma * ts
+    margin_thresh = max(tm - margin_sigma * ts, 0.0)
     margins = custom["margins"]
     cb      = custom["closest_boundary"]
 
@@ -253,8 +311,12 @@ def main():
 
     print(f"\n  Thresholds (σ={args.drift_sigma}):")
     print(f"    Baseline — data > {bl_dth:.4f}  |  conf < {bl_cth:.4f}")
-    print(f"    HAS      — data > {has_dth:.4f}  |  margin < {mth:.4f} "
-          f"(μ={tmean:.4f}, σ={tstd:.4f})")
+    if has_dth is None:
+        print(f"    HAS      — data > per-class cosine threshold  |  "
+          f"margin < {mth:.4f} (μ={tmean:.4f}, σ={tstd:.4f})")
+    else:
+        print(f"    HAS      — data > {has_dth:.4f}  |  "
+          f"margin < {mth:.4f} (μ={tmean:.4f}, σ={tstd:.4f})")
     print(f"    HAS margin-drifted: {df_has['has_margin_drifted'].mean()*100:.1f}%")
 
     save_csv(df_bl,  "drift_baseline.csv", "per-image Baseline")
