@@ -1,58 +1,69 @@
 """
+finetune.py — Redesigned fine-tuning ablation study.
+
+Must be run AFTER detect.py (reads drift CSVs with file_path column).
 
 ─────────────────────────────────────────────────────────────────────────────
 DESIGN
 ─────────────────────────────────────────────────────────────────────────────
-Fine-tune pool  = all Pure Data Drift samples, sorted by data_drift_score
-                  descending (furthest from training centroid first).
-                  Labels are ground-truth from folder structure.
-                  Geometrically certified: high margin → label reliable.
 
-For each (mode × ft_pct) run:
+Fine-tuning approach (both models):
+  • Head-only: backbone fully frozen, only classifier head updated
+      Baseline → model.classifier  (Linear 64→5,  320 params)
+      HAS      → model.has_layer   (cosine head,  320 params)
+  • Loss: CrossEntropy only — no HAS penalty
+      The spherical geometry already exists from training.
+      We only need to reposition the class boundaries.
+  • LR: 1e-2 (safe with only 320 params, 10× higher than full-model FT)
+  • Epochs: 20 (head-only convergence is fast)
 
-  Fine-tune set  = top ft_pct% of pool  (what the model learns from)
+Shared budget N:
+  N is defined by the HAS Pure Data Drift pool size (e.g. 103).
+  Both models use the same N for each ft_pct — fair comparison.
+  ft_pct=25% → N=26 for both, ft_pct=50% → N=52, ft_pct=100% → N=103.
 
-  Test set       = two parts combined:
-    Part A — Held-out pool:
-                  bottom (1-ft_pct)% of pool, NEVER seen during fine-tuning.
-                  These are also Pure Data Drift but held out.
-                  Answers: does fine-tuning on 25% of data-drifted samples
-                  improve performance on the other 75%? (data efficiency)
-    Part B — Category samples:
-                  all non-Pure-Data-Drift custom samples.
-                  In-Distribution   → catastrophic forgetting check
-                  Pure Concept Drift → does data-drift fine-tuning also fix
-                                       boundary confusion? (geometric coupling)
-                  Full Drift         → hardest cases
+Four selection modes:
+  has-margin      HAS only. Top N from Pure Data Drift pool ranked by
+                  data_drift_score descending. Geometrically certified:
+                  high angular margin → label reliable, novel territory.
+                  This is the proposed method.
 
-  Category samples are built ONCE per model and reused across all runs.
-  The held-out pool changes per ft_pct — test set is rebuilt each run.
+  baseline-conf   Baseline only. Top N from full custom set ranked by
+                  confidence ascending (lowest confidence first).
+                  This is the Baseline's native drift signal — its best
+                  attempt at selecting informative fine-tuning data.
 
-Special case ft_pct = 1.0:
-  All pool samples are used for fine-tuning → held-out pool is empty.
-  Test set = category samples only (consistent with original design).
+  random          Both models. N random images from the full custom set.
+                  Fixed seed=42 → reproducible. Same N as has-margin.
+                  This is the no-selection-criterion control: what a
+                  practitioner without a drift detector would do.
 
-Special case mode = "all":
-  Uses all non-concept-drift samples for fine-tuning regardless of ft_pct.
-  Test set = category samples only (no held-out pool since pool is consumed).
+  all             Both models. All non-Pure-Concept-Drift custom samples.
+                  No selection criterion, maximum data.
+                  Negative control: brute-force vs targeted.
+
+Fixed test set:
+  ALL 2150 custom images. Identical for every (model × mode × ft_pct).
+  Broken down by HAS drift categories so both models are evaluated on
+  the same taxonomy.
 
 ─────────────────────────────────────────────────────────────────────────────
-ABLATION TABLE COLUMNS
+WHAT THE COMPARISONS ANSWER
 ─────────────────────────────────────────────────────────────────────────────
-  ALL Δ         overall error rate Δ across the full test set
-  DataDrift Δ   error Δ on held-out Pure Data Drift (data efficiency signal)
-  InDist Δ      error Δ on In-Distribution (catastrophic forgetting check)
-  Concept Δ     error Δ on Pure Concept Drift (geometric coupling finding)
-  Full Δ        error Δ on Full Drift (hardest samples)
+
+HAS has-margin   vs  HAS random       → does geometric selection beat blind sampling?
+HAS has-margin   vs  BL baseline-conf → does margin beat confidence for selection?
+HAS any-mode     vs  BL same-mode     → does HAS architecture enable better adaptation?
+drift 25% vs 50% vs 100%              → data efficiency curve
 
 ─────────────────────────────────────────────────────────────────────────────
 USAGE
 ─────────────────────────────────────────────────────────────────────────────
-  python finetune.py                              # all modes, 25/50/100%
-  python finetune.py --ft-pcts 50                 # single percentage
-  python finetune.py --ft-mode drift-ranked       # single mode
-  python finetune.py --ft-pcts 10,25,50,75,100   # full sweep
-  python finetune.py --ft-epochs 15 --ft-lr 5e-5
+  python finetune.py                          # all modes, 25/50/100%
+  python finetune.py --ft-pcts 50             # single percentage
+  python finetune.py --ft-mode has-margin     # single mode
+  python finetune.py --ft-pcts 10,25,50,100  # extended sweep
+  python finetune.py --ft-epochs 20 --ft-lr 1e-2
 
   nohup python finetune.py > logs/finetune.log 2>&1 &
 """
@@ -61,40 +72,42 @@ import argparse, os, sys
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 
 from config import (
-    CUSTOM_CLASS_MAP, WEIGHT_DIR, RESULT_DIR, DEVICE,
-    ALPHA, BETA, HAS_MARGIN, HAS_SCALE, BATCH_SIZE,
-    LANDSCAPE_CLASSES, ensure_dirs, resolve_custom_root,
+    WEIGHT_DIR, RESULT_DIR, DEVICE,
+    HAS_MARGIN, HAS_SCALE, BATCH_SIZE,
+    LANDSCAPE_CLASSES, ensure_dirs,
 )
-from models import (
-    BaselineModel, HASModel,
-    TRAIN_AUGMENT, STANDARD_TRANSFORM,
-)
+from models import BaselineModel, HASModel, TRAIN_AUGMENT, STANDARD_TRANSFORM
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
-FINETUNE_EPOCHS = 10
-FINETUNE_LR     = 1e-4      # 500–1000× lower than training LR
-RANDOM_SEED     = 42        # fixed → reproducible random baseline
+FINETUNE_EPOCHS = 20     # head-only converges faster than full model
+FINETUNE_LR     = 1e-2   # safe with only 320 params (10× full-model LR)
+RANDOM_SEED     = 42
 
-# Drift type order for evaluation and CSV columns
+# Drift type display order for print and CSV
 _DRIFT_ORDER = [
     "overall",
-    "Pure Data Drift",    # held-out pool — data efficiency signal
-    "In-Distribution",    # catastrophic forgetting check
-    "Pure Concept Drift", # geometric coupling finding
-    "Full Drift (both)",  # hardest cases
+    "In-Distribution",
+    "Pure Data Drift",
+    "Data Drift",
+    "Pure Concept Drift",
+    "Concept Drift",
+    "Full Drift (both)",
 ]
 _DRIFT_SHORT = {
     "overall":            "ALL",
-    "Pure Data Drift":    "DataDrift",
     "In-Distribution":    "InDist",
+    "Pure Data Drift":    "DataDrift",
+    "Data Drift":         "DataDrift",
     "Pure Concept Drift": "Concept",
+    "Concept Drift":      "Concept",
     "Full Drift (both)":  "Full",
 }
 
@@ -104,10 +117,10 @@ _DRIFT_SHORT = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PathLabelDataset(Dataset):
-    """Dataset from explicit (path, label) lists — used for fine-tune set."""
+    """Dataset from explicit (path, label) lists."""
     def __init__(self, paths, labels, transform=None):
-        self.paths     = list(paths)
-        self.labels    = list(labels)
+        self.paths = list(paths)
+        self.labels = list(labels)
         self.transform = transform
 
     def __len__(self):
@@ -117,166 +130,147 @@ class PathLabelDataset(Dataset):
         try:
             img = Image.open(self.paths[idx]).convert("RGB")
         except Exception:
-            img = Image.open(self.paths[(idx + 1) % len(self.paths)]).convert("RGB")
+            img = Image.open(self.paths[(idx+1) % len(self.paths)]).convert("RGB")
         if self.transform:
             img = self.transform(img)
         return img, self.labels[idx]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sample loading helpers
+# CSV helpers — all path reading goes through file_path column
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _paths_from_df(df, custom_root):
-    """Reconstruct (paths, labels) from CSV rows using CUSTOM_CLASS_MAP.
+def _read_csv(csv_path):
+    if not os.path.exists(csv_path):
+        sys.exit(f"ERROR: {csv_path} not found — run detect.py first.")
+    df = pd.read_csv(csv_path)
+    if "file_path" not in df.columns:
+        sys.exit(f"ERROR: 'file_path' column missing in {csv_path}.\n"
+                 f"  Re-run detect.py with the updated version.")
+    return df
 
-    Groups by unique (true_class, sub_category) before scanning folders
-    to avoid adding the same subfolder multiple times — the CSV has one
-    row per image but multiple rows share the same sub_category folder.
-    """
+
+def _df_to_paths_labels(df):
+    """Extract valid (paths, labels) from a DataFrame."""
     cls_to_idx = {c: i for i, c in enumerate(LANDSCAPE_CLASSES)}
     paths, labels = [], []
-    seen = set()   # track (true_class, sub_category) already scanned
-
     for _, row in df.iterrows():
-        key = (row["true_class"], row["sub_category"])
-        if key in seen:
-            continue
-        seen.add(key)
-
+        p   = str(row["file_path"])
         lbl = cls_to_idx.get(row["true_class"], -1)
-        if lbl < 0:
+        if lbl < 0 or not p or not os.path.exists(p):
             continue
-        sub = row["sub_category"]
-        for folder, idx in CUSTOM_CLASS_MAP.items():
-            if idx != lbl:
-                continue
-            sub_path = os.path.join(custom_root, folder, sub)
-            if not os.path.isdir(sub_path):
-                continue
-            for fname in os.listdir(sub_path):
-                if fname.lower().endswith(("jpg", "jpeg", "png")):
-                    paths.append(os.path.join(sub_path, fname))
-                    labels.append(lbl)
-            break
+        paths.append(p)
+        labels.append(lbl)
     return paths, labels
 
-def _load_pool(csv_path, custom_root, drift_col):
-    """Load Pure Data Drift samples sorted by data_drift_score descending.
 
-    Sorted descending = most spatially novel samples first, so drift-ranked
-    mode takes pool[:n_use] (the highest-drift samples) and the held-out
-    test portion is pool[n_use:] (the lower-drift end of the same category).
+# ─────────────────────────────────────────────────────────────────────────────
+# Pool and test set loading
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Returns (paths, labels) or None if pool is empty / CSV missing.
+def _load_has_pool(has_csv):
+    """Load HAS Pure Data Drift pool sorted by data_drift_score descending.
+
+    This pool defines the reference budget N for all modes and both models.
+    Sorted descending = most spatially novel samples first.
     """
-
-    df = pd.read_csv(csv_path)
-    pool_label = "Pure Data Drift" if "Pure Data Drift" in df[drift_col].values else "Data Drift"
-    pool = (df[df[drift_col] == pool_label]
+    df = _read_csv(has_csv)
+    pool = (df[df["has_drift_type_margin"] == "Pure Data Drift"]
             .sort_values("data_drift_score", ascending=False)
             .copy())
-
-    paths, labels = _paths_from_df(pool, custom_root)
-    if not paths:
-        print("  ⚠ Fine-tune pool is empty (no Pure Data Drift samples found)")
-        return None
-
-    print(f"  Fine-tune pool: {len(paths)} Pure Data Drift images "
-          f"(sorted by data_drift_score ↓)")
-    return paths, labels
+    if len(pool) == 0:
+        print("  ⚠ HAS Pure Data Drift pool is empty"); return None, 0
+    paths, labels = _df_to_paths_labels(pool)
+    print(f"  HAS pool: {len(paths)} Pure Data Drift images "
+          f"(sorted by data_drift_score ↓, reference budget N={len(paths)})")
+    return (paths, labels), len(paths)
 
 
-def _load_category_test(csv_path, custom_root, drift_col):
-    """Load all non-Pure-Data-Drift samples as (path, label, drift_type) triples.
+def _load_full_test(csv_path, drift_col):
+    """ALL custom images as (path, label, drift_type) triples.
 
-    These are the stable part of the test set — same across all ft_pct values.
-    Contains: In-Distribution, Pure Concept Drift, Full Drift (both).
+    Fixed test set — identical for every run, both models.
+    2150 images broken down by HAS drift categories.
     """
-    df= pd.read_csv(csv_path)
-    pool_label = "Pure Data Drift" if "Pure Data Drift" in df[drift_col].values \
-             else "Data Drift"
-    test_df = df[df[drift_col] != pool_label].copy()
-
-    records    = []
+    df = _read_csv(csv_path)
     cls_to_idx = {c: i for i, c in enumerate(LANDSCAPE_CLASSES)}
-    for _, row in test_df.iterrows():
+    records = []
+    for _, row in df.iterrows():
+        p   = str(row["file_path"])
         lbl = cls_to_idx.get(row["true_class"], -1)
-        if lbl < 0:
+        if lbl < 0 or not p or not os.path.exists(p):
             continue
-        sub = row["sub_category"]
-        for folder, idx in CUSTOM_CLASS_MAP.items():
-            if idx != lbl:
-                continue
-            sub_path = os.path.join(custom_root, folder, sub)
-            if not os.path.isdir(sub_path):
-                continue
-            for fname in os.listdir(sub_path):
-                if fname.lower().endswith(("jpg", "jpeg", "png")):
-                    records.append((
-                        os.path.join(sub_path, fname),
-                        lbl,
-                        row[drift_col],
-                    ))
-            break
-
-    print(f"  Category test samples: {len(records)} "
-          f"(In-Dist + Concept Drift + Full Drift)")
-    vc = pd.Series([r[2] for r in records]).value_counts()
-    for dt, cnt in vc.items():
-        print(f"    {dt:<26}: {cnt:5d}  ({cnt/len(records)*100:.1f}%)")
+        records.append((p, lbl, row[drift_col]))
     return records
 
 
-def _build_test_set(pool_paths, pool_labels, n_use, category_records):
-    """Build the full test set for a specific (mode × ft_pct) run.
+# ─────────────────────────────────────────────────────────────────────────────
+# Selection — four modes
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Test set = held-out pool (pool[n_use:]) + category samples.
+def _select_has_margin(has_pool_paths, has_pool_labels, n_use):
+    """HAS native: top N from Pure Data Drift pool by data_drift_score.
 
-    pool[n_use:]  = Pure Data Drift samples NOT used for fine-tuning.
-                    These are the data efficiency measurement:
-                    did fine-tuning on n_use samples improve performance
-                    on the remaining unseen data-drifted samples?
-
-    category      = In-Distribution, Pure Concept Drift, Full Drift.
-                    Same across all runs.
-
-    When n_use == len(pool) (ft_pct = 1.0), held-out pool is empty and
-    test set = category samples only.
+    These are the most spatially novel samples with geometrically
+    certified labels (high angular margin = far from all boundaries).
     """
-    held_out = [
-        (pool_paths[i], pool_labels[i], "Pure Data Drift")
-        for i in range(n_use, len(pool_paths))
-    ]
-    return held_out + list(category_records)
+    sel = has_pool_paths[:n_use], has_pool_labels[:n_use]
+    print(f"  [has-margin] Top {len(sel[0])}/{len(has_pool_paths)} "
+          f"Pure Data Drift samples (biggest drift first)")
+    return sel
 
 
-def _select_finetune(pool_paths, pool_labels, n_use, mode,
-                     csv_path, custom_root, drift_col):
-    """Select the fine-tune samples for this (mode × ft_pct) run.
+def _select_baseline_conf(bl_csv, n_use):
+    """Baseline native: top N from full custom set by confidence ascending.
 
-    drift-ranked: pool[:n_use]  (highest data_drift_score first)
-    random:       random n_use from pool (fixed seed → reproducible)
-    all:          all non-Pure-Concept-Drift samples (broader pool,
-                  ignores n_use — used as a negative control)
+    Lowest confidence = most uncertain = Baseline's proxy for drift.
+    This is the Baseline's best attempt at selecting informative samples.
+    Uses the full custom set (not just flagged-drifted) to match the
+    spirit of HAS selecting from its geometrically defined pool.
     """
-    if mode == "drift-ranked":
-        return pool_paths[:n_use], pool_labels[:n_use]
+    df = _read_csv(bl_csv)
+    # Sort ascending: lowest confidence first (most uncertain)
+    selected = df.sort_values("max_confidence", ascending=True).head(n_use)
+    paths, labels = _df_to_paths_labels(selected)
+    print(f"  [baseline-conf] {len(paths)} images with lowest confidence "
+          f"(mean conf={selected['max_confidence'].mean():.3f})")
+    # Show drift type breakdown for transparency
+    if "drift_type" in selected.columns:
+        vc = selected["drift_type"].value_counts()
+        for dt, cnt in vc.items():
+            print(f"    {dt:<26}: {cnt} ({cnt/len(selected)*100:.1f}%)")
+    return paths, labels
 
-    elif mode == "random":
-        rng = np.random.default_rng(RANDOM_SEED)
-        idx = rng.choice(len(pool_paths),
-                         size=min(n_use, len(pool_paths)),
-                         replace=False)
-        return ([pool_paths[i] for i in idx],
-                [pool_labels[i] for i in idx])
 
-    else:  # "all" — negative control: use everything (including lower-quality labels)
-        df = pd.read_csv(csv_path)
-        # Exclude Pure Concept Drift only — those have the most unreliable labels
-        subset = df[df[drift_col] != "Pure Concept Drift"]
-        paths, labels = _paths_from_df(subset, custom_root)
-        return paths, labels
+def _select_random(csv_path, n_use, seed=RANDOM_SEED):
+    """Random N from the full custom set — no selection criterion.
+
+    Same seed for both models → identical random samples → fair comparison.
+    This is what a practitioner without a drift detector would do.
+    """
+    df = _read_csv(csv_path)
+    paths_all, labels_all = _df_to_paths_labels(df)
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(paths_all), size=min(n_use, len(paths_all)),
+                     replace=False)
+    paths  = [paths_all[i]  for i in idx]
+    labels = [labels_all[i] for i in idx]
+    print(f"  [random] {len(paths)} images from full custom set (seed={seed})")
+    return paths, labels
+
+
+def _select_all(csv_path, drift_col):
+    """All non-Pure-Concept-Drift custom samples.
+
+    Excludes only the samples with the most unreliable labels
+    (near-boundary, ambiguous).
+    """
+    df = _read_csv(csv_path)
+    concept_labels = {"Pure Concept Drift", "Concept Drift"}
+    subset = df[~df[drift_col].isin(concept_labels)]
+    paths, labels = _df_to_paths_labels(subset)
+    print(f"  [all] {len(paths)} images (full custom set minus concept-drifted)")
+    return paths, labels
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,16 +278,14 @@ def _select_finetune(pool_paths, pool_labels, n_use, mode,
 # ─────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def _evaluate_by_drift_type(model, test_records):
-    """Error rate per drift type.
+def _evaluate(model, test_records):
+    """Error rate per drift type. Lower is better.
 
-    Returns dict {drift_type: error_pct, "overall": error_pct}.
-    Error rate = % wrong (100 − accuracy). Lower is better.
-    Processes in mini-batches of 64 for speed.
+    test_records: list of (path, label, drift_type)
+    Returns dict {drift_type: error_pct, "overall": error_pct}
     """
     if not test_records:
         return {}
-
     model.eval()
     by_type = {}
     for _, _, dt in test_records:
@@ -301,7 +293,7 @@ def _evaluate_by_drift_type(model, test_records):
 
     BATCH = 64
     for start in range(0, len(test_records), BATCH):
-        chunk = test_records[start:start + BATCH]
+        chunk = test_records[start:start+BATCH]
         imgs_list, labels_b, dtypes_b = [], [], []
         for path, label, dtype in chunk:
             try:
@@ -313,45 +305,118 @@ def _evaluate_by_drift_type(model, test_records):
             dtypes_b.append(dtype)
         if not imgs_list:
             continue
-        tensor = torch.stack(imgs_list).to(DEVICE)
-        preds  = model(tensor)[0].argmax(1).cpu().tolist()
+        preds = model(torch.stack(imgs_list).to(DEVICE))[0].argmax(1).cpu().tolist()
         for pred, lbl, dtype in zip(preds, labels_b, dtypes_b):
             by_type[dtype]["total"]   += 1
             by_type[dtype]["correct"] += int(pred == lbl)
 
     out = {}
-    total_c = total_n = 0
+    tc = tn = 0
     for dtype, c in by_type.items():
         n, correct = c["total"], c["correct"]
         if n > 0:
             out[dtype] = round(100.0 * (n - correct) / n, 2)
-            total_c += correct
-            total_n += n
-    out["overall"] = (round(100.0 * (total_n - total_c) / total_n, 2)
-                      if total_n > 0 else None)
+            tc += correct; tn += n
+    out["overall"] = round(100.0 * (tn - tc) / tn, 2) if tn > 0 else None
     return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Printing helpers
+# Head-only fine-tuning
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_finetune(model, model_type, sel_paths, sel_labels,
+                   ft_epochs, ft_lr):
+    """Fine-tune ONLY the classifier head. Backbone fully frozen.
+
+    For Baseline: updates model.classifier (Linear 64→5 = 320 params)
+    For HAS:      updates model.has_layer  (cosine head = 320 params)
+
+    Loss: CrossEntropy only — no HAS penalty.
+    The spherical geometry already exists from training.
+    We only reposition the class boundaries on the sphere.
+
+    LR is higher than full-model fine-tuning because:
+      - Only 320 parameters are updated (not 23M)
+      - Backbone is frozen — no risk of distorting features
+      - Head needs to move meaningfully on small data
+    """
+    # Step 1: freeze all parameters
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Step 2: unfreeze only the classifier head
+    if model_type == "baseline":
+        for param in model.classifier.parameters():
+            param.requires_grad = True
+        trainable = list(model.classifier.parameters())
+    else:
+        for param in model.has_layer.parameters():
+            param.requires_grad = True
+        trainable = list(model.has_layer.parameters())
+
+    n_params = sum(p.numel() for p in trainable)
+    print(f"  Trainable: {n_params} params (head only, backbone frozen)")
+
+    ft_ds = PathLabelDataset(sel_paths, sel_labels, transform=TRAIN_AUGMENT)
+    ft_loader = DataLoader(
+        ft_ds, batch_size=min(BATCH_SIZE, len(ft_ds)),
+        shuffle=True, num_workers=4, drop_last=False)
+
+    opt = torch.optim.SGD(trainable, lr=ft_lr,
+                           momentum=0.9, weight_decay=1e-4)
+    ce  = nn.CrossEntropyLoss()
+
+    for ep in range(1, ft_epochs + 1):
+        model.train()
+        tot_loss = correct = total = 0
+        for imgs, lbls in ft_loader:
+            imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
+            opt.zero_grad()
+            logits = model(imgs)[0]    # first return = logits for both models
+            # For HAS: logits are log_softmax → exp() to get probabilities for CE
+            if model_type == "has":
+                loss = nn.NLLLoss()(logits,lbls)
+            else:
+                loss = ce(logits, lbls)
+            loss.backward(); opt.step()
+            tot_loss += loss.item()
+            correct  += logits.argmax(1).eq(lbls).sum().item()
+            total    += len(lbls)
+        print(f"    EP {ep:2d}/{ft_epochs} | "
+              f"Loss {tot_loss/len(ft_loader):.4f} | "
+              f"Train-Acc {100*correct/total:.1f}%")
+
+    # Re-enable all gradients after fine-tuning
+    for param in model.parameters():
+        param.requires_grad = True
+
+    return model
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Print helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _print_err(prefix, err_dict):
-    parts = [f"{_DRIFT_SHORT.get(k, k)}={err_dict[k]:.1f}%err"
-             for k in _DRIFT_ORDER if err_dict.get(k) is not None]
+    order = ["overall", "In-Distribution", "Pure Data Drift", "Data Drift",
+             "Pure Concept Drift", "Concept Drift", "Full Drift (both)"]
+    parts = [f"{_DRIFT_SHORT.get(k,k)}={err_dict[k]:.1f}%err"
+             for k in order if err_dict.get(k) is not None]
     print(f"  {prefix}: " + "  |  ".join(parts))
 
 
 def _print_summary(rows):
     if not rows:
         return
-    print("\n" + "=" * 94)
-    print("ABLATION SUMMARY — Error Rate on Test Set  (negative Δ = fewer errors = better)")
-    print("=" * 94)
-    print(f"\n  {'Model':<10} {'Mode':<14} {'ft%':>4} {'N-FT':>6} {'N-Test':>7}  "
+    print("\n" + "=" * 100)
+    print("ABLATION SUMMARY — Error Rate on FULL CUSTOM SET (all 2150 images)")
+    print("Head-only fine-tuning (backbone frozen)  |  Negative Δ = improvement")
+    print("=" * 100)
+    print(f"\n  {'Model':<10} {'Mode':<16} {'ft%':>4} {'N-FT':>6}  "
           f"{'ALL Δ':>7}  {'DataDrift Δ':>12}  {'InDist Δ':>10}  "
-          f"{'Concept Δ':>11}  {'Full Δ':>8}")
-    print("  " + "─" * 88)
+          f"{'Concept Δ':>11}  {'Full Δ':>9}")
+    print("  " + "─" * 93)
 
     prev = None
     for r in rows:
@@ -360,210 +425,171 @@ def _print_summary(rows):
                 print()
             prev = r["model"]
 
-        def fmt(k):
-            v = r.get(f"delta_{k}")
-            return "    —  " if v is None else f"{v:+.1f}%"
+        def fmt(keys):
+            for k in (keys if isinstance(keys, list) else [keys]):
+                v = r.get(f"delta_{k}")
+                if v is not None:
+                    return f"{v:+.1f}%"
+            return "    —  "
 
-        print(f"  {r['model']:<10} {r['mode']:<14} "
-              f"{r['ft_pct']*100:>3.0f}% {r['n_finetune']:>6} {r['n_test']:>7}  "
+        print(f"  {r['model']:<10} {r['mode']:<16} "
+              f"{r['ft_pct']*100:>3.0f}% {r['n_finetune']:>6}  "
               f"{fmt('overall'):>7}  "
-              f"{fmt('Pure Data Drift'):>12}  "
+              f"{fmt(['Pure Data Drift','Data Drift']):>12}  "
               f"{fmt('In-Distribution'):>10}  "
-              f"{fmt('Pure Concept Drift'):>11}  "
-              f"{fmt('Full Drift (both)'):>8}")
+              f"{fmt(['Pure Concept Drift','Concept Drift']):>11}  "
+              f"{fmt('Full Drift (both)'):>9}")
 
     print()
-    print("  DataDrift Δ: did fine-tuning on top ft% improve the held-out bottom (1-ft)?")
-    print("               This measures data efficiency of the selection strategy.")
-    print("  InDist Δ   : positive = catastrophic forgetting (fine-tuning hurt clean data).")
-    print("  Concept Δ  : negative = geometric coupling — data-drift fine-tuning also")
-    print("               reduces boundary confusion (key paper finding).")
+    print("  KEY COMPARISONS:")
+    print("  HAS  has-margin  vs  HAS  random      → geometric selection vs blind sampling")
+    print("  HAS  has-margin  vs  BL   baseline-conf → margin-based vs confidence-based")
+    print("  HAS  any-mode    vs  BL   same-mode    → architecture advantage")
+    print("  Positive InDist Δ = catastrophic forgetting (should be ~0 for head-only)")
+    print("  Negative Full Δ  = geometric coupling: data-drift FT fixes boundary confusion")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fine-tuning — one pass
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _run_finetune(model, model_type, sel_paths, sel_labels, ft_epochs, ft_lr):
-    """Fine-tune model in-place. Returns model."""
-    ft_ds     = PathLabelDataset(sel_paths, sel_labels, transform=TRAIN_AUGMENT)
-    ft_loader = DataLoader(ft_ds,
-                           batch_size=min(BATCH_SIZE, len(ft_ds)),
-                           shuffle=True, num_workers=4, drop_last=False)
-    opt = torch.optim.SGD(model.parameters(), lr=ft_lr,
-                           momentum=0.9, weight_decay=1e-4)
-    ce  = torch.nn.CrossEntropyLoss()
-    nll = torch.nn.NLLLoss()
-
-    for ep in range(1, ft_epochs + 1):
-        model.train()
-        tot_loss = correct = total = 0
-        for imgs, lbls in ft_loader:
-            imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
-            opt.zero_grad()
-            if model_type == "baseline":
-                logits, _ = model(imgs)
-                loss = ce(logits, lbls)
-            else:
-                logits, penalty, _ = model(imgs, labels=lbls)
-                loss = ALPHA * nll(logits, lbls) + BETA * penalty
-            loss.backward(); opt.step()
-            tot_loss += loss.item()
-            correct  += logits.argmax(1).eq(lbls).sum().item()
-            total    += len(lbls)
-        print(f"    EP {ep:2d}/{ft_epochs} | "
-              f"Loss {tot_loss/len(ft_loader):.4f} | "
-              f"Train-Acc {100*correct/total:.1f}%")
-    return model
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main ablation loop
+# Main ablation
 # ─────────────────────────────────────────────────────────────────────────────
 
 def finetune_ablation(ft_epochs=FINETUNE_EPOCHS, ft_lr=FINETUNE_LR,
-                      ft_pcts=(0.25, 0.50, 1.0),
-                      modes=("drift-ranked", "random", "all")):
-    """Run fine-tuning ablation across all (model × mode × ft_pct) combinations.
+                      ft_pcts=(0.25, 0.50, 1.0)):
+    """Run the full redesigned ablation study.
 
-    For each combination:
-      1. Load original weights fresh (modes cannot contaminate each other)
-      2. Select fine-tune samples (top n_use from pool per mode)
-      3. Build test set = held-out pool[n_use:] + category samples
-      4. Evaluate on test set BEFORE fine-tuning
-      5. Fine-tune for ft_epochs epochs
-      6. Evaluate on same test set AFTER fine-tuning
-      7. Record per-drift-type error rates
+    For each ft_pct:
+      1. Compute shared budget N from HAS pool size
+      2. For each model × mode combination:
+         a. Load ORIGINAL weights fresh
+         b. Select N images according to mode
+         c. Evaluate on FULL 2150 custom images BEFORE fine-tuning
+         d. Fine-tune HEAD ONLY for ft_epochs with CrossEntropy
+         e. Evaluate on SAME full test set AFTER fine-tuning
+         f. Record per-drift-type error rates
     """
     print("\n" + "=" * 68)
-    print("FINE-TUNING ABLATION")
+    print("FINE-TUNING ABLATION — REDESIGNED")
     print("=" * 68)
-    print(f"  Modes   : {list(modes)}")
-    print(f"  ft_pcts : {[f'{p*100:.0f}%' for p in ft_pcts]}")
-    print(f"  Epochs  : {ft_epochs}  |  LR: {ft_lr}")
-    print(f"  Pool    : Pure Data Drift, sorted by data_drift_score ↓")
-    print(f"  Test    : held-out pool (bottom 1-ft%) + category samples\n")
+    print(f"  ft_pcts  : {[f'{p*100:.0f}%' for p in ft_pcts]}")
+    print(f"  Epochs   : {ft_epochs}  |  LR: {ft_lr}")
+    print(f"  Approach : head-only (backbone frozen), CrossEntropy loss")
+    print(f"  Budget N : defined by HAS Pure Data Drift pool size")
+    print(f"  Test set : ALL 2150 custom images (fixed)\n")
 
-    custom_root = resolve_custom_root()
-    bl_path     = os.path.join(WEIGHT_DIR, "baseline.pth")
-    has_path    = os.path.join(WEIGHT_DIR, "has_model.pth")
+    bl_path  = os.path.join(WEIGHT_DIR, "baseline.pth")
+    has_path = os.path.join(WEIGHT_DIR, "has_model.pth")
     for p in [bl_path, has_path]:
         if not os.path.exists(p):
             sys.exit(f"ERROR: {p} not found — run train.py first.")
 
+    bl_csv  = os.path.join(RESULT_DIR, "drift_baseline.csv")
+    has_csv = os.path.join(RESULT_DIR, "drift_has.csv")
+
+    # ── Load HAS pool once — defines budget N for all runs ───────────────────
+    print("Loading HAS pool (defines shared budget N) …")
+    has_pool_result, n_pool = _load_has_pool(has_csv)
+    if has_pool_result is None:
+        sys.exit("ERROR: HAS pool is empty — run detect.py first.")
+    has_pool_paths, has_pool_labels = has_pool_result
+
+    # ── Load fixed test sets (once per model) ─────────────────────────────────
+    print("\nLoading fixed test sets …")
+    # Use HAS taxonomy for both models (richer categories)
+    has_test_records = _load_full_test(has_csv, "has_drift_type_margin")
+    bl_test_records  = _load_full_test(has_csv, "has_drift_type_margin")
+    # Both models evaluated on HAS categories — same taxonomy, fair comparison
+    print(f"  Test set (HAS taxonomy): {len(has_test_records)} images")
+    vc = pd.Series([r[2] for r in has_test_records]).value_counts()
+    for dt, cnt in vc.items():
+        print(f"    {dt:<26}: {cnt:5d}  ({cnt/len(has_test_records)*100:.1f}%)")
+
     all_rows = []
 
-    for model_tag, model_type, csv_name, drift_col, orig_path, save_prefix in [
-        ("Baseline", "baseline", "drift_baseline.csv", "drift_type",
-         bl_path,   "baseline"),
-        ("HAS",      "has",      "drift_has.csv",       "has_drift_type_margin",
-         has_path,  "has_model"),
-    ]:
-        csv_full = os.path.join(RESULT_DIR, csv_name)
-        print(f"\n  ══ {model_tag} ══════════════════════════════════════════════")
+    for ft_pct in ft_pcts:
+        n_use = max(1, int(np.ceil(ft_pct * n_pool)))
+        print(f"\n{'═'*68}")
+        print(f"  ft_pct = {ft_pct*100:.0f}%  →  N = {n_use} images per run")
+        print(f"{'═'*68}")
 
-        # ── Load pool and category test samples (once per model) ─────────────
-        print(f"\n  Loading fine-tune pool …")
-        pool_result = _load_pool(csv_full, custom_root, drift_col)
-        if pool_result is None:
-            print(f"  ⚠ No pool — skipping {model_tag}")
-            continue
-        pool_paths, pool_labels = pool_result
-        n_pool = len(pool_paths)
+        # ── Define (model, mode) combinations ────────────────────────────────
+        # has-margin: only for HAS (uses HAS geometric signal)
+        # baseline-conf: only for Baseline (uses Baseline native signal)
+        # random: both models, same N, same seed
+        # all: both models, same pool definition
+        runs = [
+            # (model_tag, model_type, orig_path, test_records, mode, csv_for_select, save_prefix)
+            ("HAS",      "has",      has_path, has_test_records, "has-margin",     has_csv, "has_model"),
+            ("HAS",      "has",      has_path, has_test_records, "random",          has_csv, "has_model"),
+            ("HAS",      "has",      has_path, has_test_records, "all",             has_csv, "has_model"),
+            ("Baseline", "baseline", bl_path,  bl_test_records,  "baseline-conf",   bl_csv,  "baseline"),
+            ("Baseline", "baseline", bl_path,  bl_test_records,  "random",          bl_csv,  "baseline"),
+            ("Baseline", "baseline", bl_path,  bl_test_records,  "all",             bl_csv,  "baseline"),
+        ]
 
-        print(f"\n  Loading category test samples …")
-        category_records = _load_category_test(csv_full, custom_root, drift_col)
-        if not category_records and n_pool == 0:
-            print(f"  ⚠ No data — skipping {model_tag}")
-            continue
+        for model_tag, model_type, orig_path, test_records, mode, csv_path, save_prefix in runs:
+            print(f"\n  ── {model_tag} | {mode} | {ft_pct*100:.0f}% ({n_use} images) ──")
 
-        # ── Reference model (no fine-tuning) ─────────────────────────────────
-        # Evaluate on the ft_pct=1.0 test set (= category only, no held-out pool)
-        # as a common baseline for all rows.
-        if model_tag == "Baseline":
-            ref = BaselineModel(n_classes=len(LANDSCAPE_CLASSES)).to(DEVICE)
-        else:
-            ref = HASModel(n_classes=len(LANDSCAPE_CLASSES),
-                            margin=HAS_MARGIN, scale=HAS_SCALE).to(DEVICE)
-        ref.load_state_dict(torch.load(orig_path, map_location=DEVICE,
-                                        weights_only=True))
+            # Load ORIGINAL weights — fresh every run, no contamination
+            if model_tag == "Baseline":
+                model = BaselineModel(n_classes=len(LANDSCAPE_CLASSES)).to(DEVICE)
+            else:
+                model = HASModel(n_classes=len(LANDSCAPE_CLASSES),
+                                  margin=HAS_MARGIN, scale=HAS_SCALE).to(DEVICE)
+            model.load_state_dict(torch.load(orig_path, map_location=DEVICE,
+                                              weights_only=True))
+            print(f"  Loaded original weights: {os.path.basename(orig_path)}")
 
-        # ── Ablation loop ─────────────────────────────────────────────────────
-        for mode in modes:
-            for ft_pct in ft_pcts:
+            # Evaluate BEFORE
+            err_before = _evaluate(model, test_records)
+            _print_err("  BEFORE", err_before)
 
-                # For "all" mode, ft_pct does not limit the pool — it uses
-                # everything. Test set = category only (no held-out pool).
-                if mode == "all":
-                    n_use = n_pool   # pool fully consumed
-                else:
-                    n_use = max(1, int(np.ceil(ft_pct * n_pool)))
+            # Select fine-tuning samples
+            if mode == "has-margin":
+                sel_paths, sel_labels = _select_has_margin(
+                    has_pool_paths, has_pool_labels, n_use)
+            elif mode == "baseline-conf":
+                sel_paths, sel_labels = _select_baseline_conf(bl_csv, n_use)
+            elif mode == "random":
+                sel_paths, sel_labels = _select_random(csv_path, n_use)
+            else:  # "all"
+                sel_paths, sel_labels = _select_all(
+                    csv_path, "has_drift_type_margin" if model_type=="has"
+                              else "drift_type")
 
-                print(f"\n  ── {model_tag} | {mode} | {ft_pct*100:.0f}% ──────────────────────")
+            if not sel_paths:
+                print("  ⚠ No samples — skipping"); continue
+            print(f"  Fine-tuning on {len(sel_paths)} images …")
 
-                # ── Build test set for this run ───────────────────────────────
-                # held-out pool = pool[n_use:] (unseen Pure Data Drift samples)
-                # For "all" mode or ft_pct=1.0, held-out is empty.
-                test_records = _build_test_set(
-                    pool_paths, pool_labels, n_use, category_records)
+            # Fine-tune (head only)
+            model = _run_finetune(model, model_type, sel_paths, sel_labels,
+                                   ft_epochs, ft_lr)
 
-                n_held = len(pool_paths) - n_use if mode != "all" else 0
-                print(f"  Test set: {len(test_records)} images  "
-                      f"(held-out pool: {n_held}  |  category: {len(category_records)})")
+            # Evaluate AFTER
+            err_after = _evaluate(model, test_records)
+            _print_err("  AFTER ", err_after)
 
-                # ── Evaluate BEFORE (fresh weights) ───────────────────────────
-                if model_tag == "Baseline":
-                    model = BaselineModel(n_classes=len(LANDSCAPE_CLASSES)).to(DEVICE)
-                else:
-                    model = HASModel(n_classes=len(LANDSCAPE_CLASSES),
-                                     margin=HAS_MARGIN, scale=HAS_SCALE).to(DEVICE)
-                model.load_state_dict(torch.load(orig_path, map_location=DEVICE,
-                                                  weights_only=True))
+            # Save weights
+            save_name = f"{save_prefix}_{mode}_{int(ft_pct*100)}pct.pth"
+            torch.save(model.state_dict(),
+                       os.path.join(WEIGHT_DIR, save_name))
+            print(f"  ✓ weights/{save_name}")
 
-                err_before = _evaluate_by_drift_type(model, test_records)
-                _print_err("  BEFORE", err_before)
-
-                # ── Select fine-tune samples ───────────────────────────────────
-                sel_paths, sel_labels = _select_finetune(
-                    pool_paths, pool_labels, n_use,
-                    mode, csv_full, custom_root, drift_col)
-                if not sel_paths:
-                    print(f"  ⚠ No samples selected — skipping")
-                    continue
-                print(f"  Fine-tuning on {len(sel_paths)} images …")
-
-                # ── Fine-tune ─────────────────────────────────────────────────
-                model = _run_finetune(model, model_type,
-                                       sel_paths, sel_labels,
-                                       ft_epochs, ft_lr)
-
-                # ── Evaluate AFTER ────────────────────────────────────────────
-                err_after = _evaluate_by_drift_type(model, test_records)
-                _print_err("  AFTER ", err_after)
-
-                # ── Save weights ──────────────────────────────────────────────
-                save_name = f"{save_prefix}_{mode}_{int(ft_pct*100)}pct.pth"
-                save_path = os.path.join(WEIGHT_DIR, save_name)
-                torch.save(model.state_dict(), save_path)
-                print(f"  ✓ {save_path}")
-
-                # ── Record row ────────────────────────────────────────────────
-                row = dict(
-                    model=model_tag, mode=mode,
-                    ft_pct=ft_pct, n_finetune=len(sel_paths),
-                    n_test=len(test_records), n_held_out=n_held,
-                    ft_epochs=ft_epochs, ft_lr=ft_lr,
-                )
-                for dtype in _DRIFT_ORDER:
-                    b = err_before.get(dtype)
-                    a = err_after.get(dtype)
-                    row[f"err_before_{dtype}"] = b
-                    row[f"err_after_{dtype}"]  = a
-                    row[f"delta_{dtype}"] = (
-                        round(a - b, 2)
-                        if a is not None and b is not None
-                        else None)
-                all_rows.append(row)
+            # Record
+            row = dict(
+                model=model_tag, mode=mode,
+                ft_pct=ft_pct, n_finetune=len(sel_paths),
+                n_test=len(test_records),
+                ft_epochs=ft_epochs, ft_lr=ft_lr,
+            )
+            for dtype in (err_before.keys() | err_after.keys()):
+                b = err_before.get(dtype)
+                a = err_after.get(dtype)
+                row[f"err_before_{dtype}"] = b
+                row[f"err_after_{dtype}"]  = a
+                row[f"delta_{dtype}"] = (
+                    round(a - b, 2)
+                    if a is not None and b is not None else None)
+            all_rows.append(row)
 
     _print_summary(all_rows)
 
@@ -578,17 +604,14 @@ def finetune_ablation(ft_epochs=FINETUNE_EPOCHS, ft_lr=FINETUNE_LR,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fine-tuning ablation. Requires detect.py CSVs to exist.")
+        description="Redesigned fine-tuning ablation. "
+                    "Requires detect.py CSVs with file_path column.")
     parser.add_argument("--ft-epochs", type=int,   default=FINETUNE_EPOCHS,
-                        help=f"Fine-tune epochs per run (default {FINETUNE_EPOCHS})")
+                        help=f"Fine-tune epochs (default {FINETUNE_EPOCHS})")
     parser.add_argument("--ft-lr",     type=float, default=FINETUNE_LR,
-                        help=f"Fine-tune learning rate (default {FINETUNE_LR})")
+                        help=f"Fine-tune LR (default {FINETUNE_LR})")
     parser.add_argument("--ft-pcts",   type=str,   default="25,50,100",
-                        help="Comma-separated %% of pool to sweep (default: 25,50,100)")
-    parser.add_argument("--ft-mode",
-                        choices=["drift-ranked", "random", "all", "all-modes"],
-                        default="all-modes",
-                        help="Selection mode (default: all-modes runs all three)")
+                        help="Comma-separated %% of HAS pool (default: 25,50,100)")
     args = parser.parse_args()
 
     ensure_dirs()
@@ -600,19 +623,13 @@ def main():
         sys.exit(f"ERROR: --ft-pcts must be comma-separated numbers, "
                  f"got '{args.ft_pcts}'")
 
-    modes = (["drift-ranked", "random", "all"]
-             if args.ft_mode == "all-modes"
-             else [args.ft_mode])
-
     finetune_ablation(
         ft_epochs=args.ft_epochs,
         ft_lr=args.ft_lr,
         ft_pcts=ft_pcts,
-        modes=modes,
     )
     print("\nfinetune.py complete.")
 
 
 if __name__ == "__main__":
     main()
-t
