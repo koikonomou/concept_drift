@@ -404,6 +404,11 @@ def add_margin(row, prefix, before, after):
 # ─────────────────────────────────────────────────────────────────────────────
 # Single experiment run
 # ─────────────────────────────────────────────────────────────────────────────
+def fmt_pct(x):
+    return "—" if x is None else f"{x:.2f}%"
+
+def fmt_num(x):
+    return "—" if x is None else f"{x:.4f}"
 
 def run_condition(pool_name, pct, train_pool, concept_all, stable,
                   full_custom, args, has_weights, ckpt_dir):
@@ -445,14 +450,14 @@ def run_condition(pool_name, pct, train_pool, concept_all, stable,
     before_stable_margin  = margin_records(model, stable, args.batch_size)
     before_full_margin    = margin_records(model, full_custom, args.batch_size)
     before_source         = evaluate_source(model, args.test_root, args.batch_size)
-
-    print(f"  BEFORE concept eval: acc={before_concept['acc']:.2f}%  "
-          f"err={before_concept['err']:.2f}%  "
-          f"margin_μ={before_concept_margin['mean']:.4f}")
-    print(f"  BEFORE stable      : acc={before_stable['acc']:.2f}%  "
-          f"margin_μ={before_stable_margin['mean']:.4f}")
-    print(f"  BEFORE source test : acc={before_source['acc']:.2f}%")
-    print(f"  BEFORE full margin : μ={before_full_margin['mean']:.4f}")
+    
+    print(f"  BEFORE concept eval: acc={fmt_pct(before_concept['acc'])}  "
+            f"err={fmt_pct(before_concept['err'])}  "
+            f"margin_μ={fmt_num(before_concept_margin['mean'])}")
+    print(f"  BEFORE stable      : acc={fmt_pct(before_stable['acc'])}%  "
+          f"margin_μ={fmt_num(before_stable_margin['mean'])}")
+    print(f"  BEFORE source test : acc={fmt_pct(before_source['acc'])}%")
+    print(f"  BEFORE full margin : μ={fmt_num(before_full_margin['mean'])}")
 
     # ── Fine-tune ─────────────────────────────────────────────────────────────
     finetune_model(model, selected, args)
@@ -472,16 +477,16 @@ def run_condition(pool_name, pct, train_pool, concept_all, stable,
         d = av - bv
         return f"{d:+.2f}" if key in ("acc","err") else f"{d:+.4f}"
 
-    print(f"  AFTER  concept eval: acc={after_concept['acc']:.2f}%  "
-          f"err={after_concept['err']:.2f}%  "
-          f"margin_μ={after_concept_margin['mean']:.4f}  "
+    print(f"  AFTER  concept eval: acc={fmt_pct(after_concept['acc'])}%  "
+          f"err={fmt_pct(after_concept['err'])}%  "
+          f"margin_μ={fmt_num(after_concept_margin['mean'])}  "
           f"[Δacc={delta_str(before_concept,after_concept,'acc')}  "
           f"Δmargin={delta_str(before_concept_margin,after_concept_margin,'mean')}]")
-    print(f"  AFTER  stable      : acc={after_stable['acc']:.2f}%  "
+    print(f"  AFTER  stable      : acc={fmt_pct(after_stable['acc'])}%  "
           f"[Δacc={delta_str(before_stable,after_stable,'acc')}]")
-    print(f"  AFTER  source test : acc={after_source['acc']:.2f}%  "
+    print(f"  AFTER  source test : acc={fmt_pct(after_source['acc'])}%  "
           f"[Δacc={delta_str(before_source,after_source,'acc')}]")
-    print(f"  AFTER  full margin : μ={after_full_margin['mean']:.4f}  "
+    print(f"  AFTER  full margin : μ={fmt_num(after_full_margin['mean'])}  "
           f"[Δ={delta_str(before_full_margin,after_full_margin,'mean')}]")
 
     # Save checkpoint

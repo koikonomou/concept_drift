@@ -1,6 +1,4 @@
 """
-run_experiment.py — Full pipeline orchestrator with auto-versioned run directories.
-
 Creates:
   runs/run1/   (or run2, run3, ... auto-incremented)
     weights/        has_model.pth, baseline.pth (copied from base weights)
@@ -9,18 +7,6 @@ Creates:
     results/finetune/  final_finetune_summary.csv, checkpoints/
     logs/           pipeline.log  (full stdout+stderr of every step)
     config.json     all hyperparameters used in this run
-
-Usage:
-    python run_experiment.py                          # default settings
-    python run_experiment.py --tag sigma_1_5 --drift-sigma 1.5
-    python run_experiment.py --tag beta_3    --ft-beta 3.0
-    python run_experiment.py --skip-extract          # reuse existing features
-    python run_experiment.py --only finetune         # run one step only
-
-    # Sensitivity sweep (run in parallel)
-    python run_experiment.py --tag s1_5 --drift-sigma 1.5 &
-    python run_experiment.py --tag s2_0 --drift-sigma 2.0 &
-    python run_experiment.py --tag s2_5 --drift-sigma 2.5 &
 
     # Aggregate all runs
     python run_experiment.py --aggregate
@@ -35,7 +21,7 @@ import shlex
 import subprocess
 import sys
 from datetime import datetime
-
+from config import HAS_SCALE, HAS_MARGIN
 import pandas as pd
 
 
@@ -110,16 +96,6 @@ def _read_config_py():
 
 
 def save_config(run_dir, args, run_dir_path):
-    """Save all hyperparameters to config.json for full reproducibility.
-
-    Captures three layers:
-      run_meta      — run directory, timestamp, git commit
-      cli_args      — every CLI argument passed to run_experiment.py
-      config_py     — every uppercase constant from config.py
-                      (EPOCHS, LR, HAS_LR, BATCH_SIZE, ALPHA, BETA,
-                       HAS_MARGIN, HAS_SCALE, DRIFT_SIGMA, HAS_MARGIN_SIGMA,
-                       LANDSCAPE_CLASSES, CUSTOM_CLASS_MAP, paths, ...)
-    """
     config = {
         "run_meta": {
             "run_dir":    run_dir_path,
@@ -141,7 +117,9 @@ def save_config(run_dir, args, run_dir_path):
             "augment":      args.augment,
             "only":         args.only,
             "skip_extract": args.skip_extract,
-        },
+            "has_scale": args.has_scale,
+            "has_margin": args.has_margin,
+            },
         "config_py": _read_config_py(),
     }
 
@@ -310,36 +288,28 @@ def main():
         description="Full pipeline orchestrator with auto-versioned run directories.")
 
     # Run control
-    parser.add_argument("--tag",        default="",
-                        help="Name suffix for this run (e.g. sigma_1_5, beta_3)")
-    parser.add_argument("--only",       default=None,
-                        choices=["extract", "detect", "finetune"],
-                        help="Run only one step (assumes previous steps are done)")
-    parser.add_argument("--skip-extract", action="store_true",
-                        help="Skip extraction (reuse features from same run dir)")
-    parser.add_argument("--dry-run",    action="store_true",
-                        help="Print commands without running them")
-    parser.add_argument("--aggregate",  action="store_true",
-                        help="Only aggregate existing runs into all_runs_summary.csv")
+    parser.add_argument("--tag", default="", help="Name suffix for this run (e.g. sigma_1_5, beta_3)")
+    parser.add_argument("--only", default=None, choices=["extract", "detect", "finetune"], help="Run only one step (assumes previous steps are done)")
+    parser.add_argument("--skip-extract", action="store_true", help="Skip extraction (reuse features from same run dir)")
+    parser.add_argument("--dry-run", action="store_true", help="Print commands without running them")
+    parser.add_argument("--aggregate", action="store_true", help="Only aggregate existing runs into all_runs_summary.csv")
 
     # detect.py hyperparameters
-    parser.add_argument("--drift-sigma", type=float, default=2.0,
-                        help="Sigma for drift detection thresholds (default 2.0)")
-    parser.add_argument("--mmd-perms",   type=int,   default=300,
-                        help="MMD permutation test samples (default 300)")
+    parser.add_argument("--drift-sigma", type=float, default=2.0, help="Sigma for drift detection thresholds (default 2.0)")
+    parser.add_argument("--mmd-perms",   type=int,   default=300, help="MMD permutation test samples (default 300)")
 
     # finetune.py hyperparameters
-    parser.add_argument("--pool",       choices=["data", "concept", "both"],
-                        default="both")
-    parser.add_argument("--ft-scope",   choices=["head", "embedder-fc-head"],
-                        default="embedder-fc-head")
-    parser.add_argument("--ft-lr",      type=float, default=5e-5)
-    parser.add_argument("--ft-beta",    type=float, default=2.0)
-    parser.add_argument("--ft-epochs",  type=int,   default=100)
+    parser.add_argument("--pool", choices=["data", "concept", "both"], default="both")
+    parser.add_argument("--ft-scope", choices=["head", "embedder-fc-head"], default="embedder-fc-head")
+    parser.add_argument("--ft-lr", type=float, default=5e-5)
+    parser.add_argument("--ft-beta", type=float, default=2.0)
+    parser.add_argument("--ft-epochs", type=int,   default=100)
     parser.add_argument("--ft-pcts",    default="25,50,100")
     parser.add_argument("--batch-size", type=int,   default=64)
     parser.add_argument("--grad-clip",  type=float, default=5.0)
     parser.add_argument("--augment",    action="store_true")
+    parser.add_argument("--has-scale", type=float, default=HAS_SCALE)
+    parser.add_argument("--has-margin", type=float, default=HAS_MARGIN)
 
     args = parser.parse_args()
 
@@ -368,7 +338,17 @@ def main():
     print(f"{'='*68}")
 
     ok = True
-
+    # ── Step 0: Train ───────────────────────────────────────────────────────
+    if args.only is None:
+        ok = run_step(
+            "Train models",
+            f"{PYTHON} src/train.py "
+            f"--has-scale {args.has_scale} "
+            f"--has-margin {args.has_margin} "
+            f"--weight-dir {wd}",
+            log_path, args.dry_run)
+        if not ok:
+            sys.exit(1)
     # ── Step 1: Extract ───────────────────────────────────────────────────────
     if args.only in (None, "extract") and not args.skip_extract:
         ok = run_step(
@@ -376,6 +356,8 @@ def main():
             f"{PYTHON} src/extract.py "
             f"--weight-dir {wd} "
             f"--feature-dir {fd}",
+            f"--has-scale {args.has_scale} ",
+            f"--has-margin {args.has_margin}",
             log_path, args.dry_run)
         if not ok:
             sys.exit(1)

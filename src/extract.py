@@ -177,6 +177,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--feature-dir", default=FEATURE_DIR)
     parser.add_argument("--weight-dir", default=WEIGHT_DIR)
+    parser.add_argument("--has-scale", type=float, default=HAS_SCALE)
+    parser.add_argument("--has-margin", type=float, default=HAS_MARGIN)
     args = parser.parse_args()
 
     feature_dir = Path(args.feature_dir)
@@ -202,7 +204,7 @@ def main():
     baseline = BaselineModel().to(DEVICE)
     baseline.load_state_dict(torch.load(bl_path, map_location=DEVICE))
 
-    has_model = HASModel(margin=HAS_MARGIN, scale=HAS_SCALE).to(DEVICE)
+    has_model = HASModel(margin=args.has_margin, scale=args.has_scale).to(DEVICE)
     has_model.load_state_dict(torch.load(has_path, map_location=DEVICE))
     print("Models loaded.\n")
 

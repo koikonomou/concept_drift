@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
+from pathlib import Path
 
 from config import (
     TRAIN_ROOT, TEST_ROOT,
@@ -117,8 +118,7 @@ def train_baseline(epochs, lr):
               f"Train-Acc {100*correct/total:.1f}% | "
               f"lr={scheduler.get_last_lr()[0]:.1e}")
 
-    path = os.path.join(WEIGHT_DIR, "baseline.pth")
-    torch.save(model.state_dict(), path)
+    weight_dir / "baseline.pth"
     print(f"\n  ✓ Saved → {path}")
     evaluate_test(model, "baseline")
 
@@ -133,14 +133,11 @@ def train_has(epochs, lr):
     print("=" * 62)
 
     dataset = ImageFolder(root=TRAIN_ROOT, transform=TRAIN_AUGMENT)
-    loader  = DataLoader(dataset, batch_size=BATCH_SIZE,
-                         shuffle=True, num_workers=4)
+    loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     print(f"  Train: {len(dataset)} samples  |  Classes: {dataset.classes}")
 
-    model     = HASModel(n_classes=len(dataset.classes),
-                         margin=HAS_MARGIN, scale=HAS_SCALE).to(DEVICE)
-    opt       = torch.optim.SGD(model.parameters(), lr=lr,
-                                momentum=0.9, nesterov=True, weight_decay=1e-4)
+    model     = HASModel(n_classes=len(dataset.classes), margin=args.has_margin, scale=args.has_scale).to(DEVICE)
+    opt       = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, nesterov=True, weight_decay=1e-4)
     milestones = [int(epochs * 0.6), int(epochs * 0.8)]
     scheduler  = torch.optim.lr_scheduler.MultiStepLR(opt, milestones, gamma=0.1)
     nll        = nn.NLLLoss()
@@ -187,8 +184,7 @@ def train_has(epochs, lr):
               f"Train-Acc {100*correct/total:.1f}% | "
               f"lr={scheduler.get_last_lr()[0]:.1e}{extra}{wu}")
 
-    path = os.path.join(WEIGHT_DIR, "has_model.pth")
-    torch.save(model.state_dict(), path)
+    weight_dir / "has_model.pth"
     print(f"\n  ✓ Saved → {path}")
     evaluate_test(model, "has")
 
@@ -198,18 +194,17 @@ def train_has(epochs, lr):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Train Baseline and HAS models, evaluate on test set.")
-    parser.add_argument("--epochs", type=int,   default=EPOCHS,
-                        help=f"Training epochs (default {EPOCHS})")
-    parser.add_argument("--lr",     type=float, default=LR,
-                        help=f"Baseline SGD learning rate (default {LR})")
-    parser.add_argument("--has-lr", type=float, default=HAS_LR,
-                        help=f"HAS SGD learning rate (default {HAS_LR})")
-    parser.add_argument("--only",   choices=["baseline", "has"],
-                        help="Train only one model")
+    parser = argparse.ArgumentParser(description="Train Baseline and HAS models, evaluate on test set.")
+    parser.add_argument("--epochs", type=int, default=EPOCHS, help=f"Training epochs (default {EPOCHS})")
+    parser.add_argument("--lr", type=float, default=LR, help=f"Baseline SGD learning rate (default {LR})")
+    parser.add_argument("--has-lr", type=float, default=HAS_LR, help=f"HAS SGD learning rate (default {HAS_LR})")
+    parser.add_argument("--only", choices=["baseline", "has"], help="Train only one model")
+    parser.add_argument("--has-scale", type=float, default=HAS_SCALE)
+    parser.add_argument("--has-margin", type=float, default=HAS_MARGIN)
+    parser.add_argument("--weight-dir", default=WEIGHT_DIR)
     args = parser.parse_args()
-
+    weight_dir = Path(args.weight_dir)
+    weight_dir.mkdir(parents=True, exist_ok=True)
     ensure_dirs()
     print(f"Device: {DEVICE}\n")
 
