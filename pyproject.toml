@@ -6,7 +6,7 @@ authors = [
     {name = "Katerina Oikonomou",email = "k.m.oikonomou@gmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "torch (>=2.10.0,<3.0.0)",
     "torchvision (>=0.25.0,<0.26.0)",
