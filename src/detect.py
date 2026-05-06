@@ -328,7 +328,7 @@ def main():
             n = int((concept_df["true_class"] == true_cls).sum())
             print(f"    {true_cls:<12} → {dom:<12} ({row[dom]:.1f}% of {n} drifted samples)")
         print()
-    save_csv(pd.DataFrame(direction_row), "concept_drift_direction.csv", result_dir)
+    save_csv(pd.DataFrame(direction_rows), "concept_drift_direction.csv", result_dir)
     
     # TABLE 4
     _sep(); print("TABLE 4 — HAS DRIFT DIRECTION MATRICES"); _sep()
