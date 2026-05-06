@@ -264,7 +264,7 @@ def main():
               f"margin < {mth:.4f} (μ={tmean:.4f}, σ={tstd:.4f})")
     print(f"    HAS margin-drifted: {df_has['has_margin_drifted'].mean()*100:.1f}%")
     save_csv(df_bl, "drift_baseline.csv", result_dir, "per-image Baseline")
-    save_csv(df_bl, "drift_has.csv", result_dir, "per-image HAS")
+    save_csv(df_has, "drift_has.csv", result_dir, "per-image HAS")
 
     # TABLE 2
     _sep(); print("TABLE 2 — DRIFT TAXONOMY COMPARISON"); _sep()
