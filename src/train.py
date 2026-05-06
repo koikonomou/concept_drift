@@ -49,13 +49,13 @@ from models import (
 def evaluate_test(model, model_type="baseline"):
     """Evaluate on TEST_ROOT with no augmentation and print result."""
     if not os.path.isdir(TEST_ROOT):
-        print(f"  ⚠ TEST_ROOT not found ({TEST_ROOT}) — skipping test evaluation")
+        print(f" TEST_ROOT not found ({TEST_ROOT}) — skipping test evaluation")
         return None
 
     ds = FolderDataset(TEST_ROOT, class_names=LANDSCAPE_CLASSES,
                        transform=STANDARD_TRANSFORM)
     if len(ds) == 0:
-        print("  ⚠ Test set is empty — skipping")
+        print("  Test set is empty — skipping")
         return None
 
     loader  = DataLoader(ds, batch_size=64, shuffle=False, num_workers=4)
@@ -97,7 +97,8 @@ def train_baseline(epochs, lr, weight_dir):
     scheduler  = torch.optim.lr_scheduler.MultiStepLR(opt, milestones, gamma=0.1)
     ce         = nn.CrossEntropyLoss()
     print(f"  lr={lr}  |  LR drops at epochs {milestones}\n")
-
+    best_acc = 0.0
+    best_state = None
     for ep in range(1, epochs + 1):
         model.train()
         tot_loss = correct = total = 0
@@ -110,7 +111,12 @@ def train_baseline(epochs, lr, weight_dir):
             tot_loss += loss.item()
             correct  += logits.argmax(1).eq(labels).sum().item()
             total    += len(labels)
+        
         scheduler.step()
+        acc = evaluate_test(model, "baseline")
+        if acc is not None and acc > best_acc:
+            best_acc = acc
+            best_state = model.state_dict()
         # Train-Acc = accuracy on training data with augmentation.
         # Measures fitting, NOT generalisation. See TEST ACC below.
         print(f"  Epoch {ep:3d}/{epochs} | "
@@ -119,8 +125,14 @@ def train_baseline(epochs, lr, weight_dir):
               f"lr={scheduler.get_last_lr()[0]:.1e}")
 
     path = weight_dir / "baseline.pth"
-    torch.save(model.state_dict(), path)
+    if best_state is not None:
+        torch.save(best_state, path)
+    else:
+        torch.save(model.state_dict(), path)
     print(f"\n  ✓ Saved → {path}")
+    print(f"\n  ┌──────────────────────────────────────────────────┐")
+    print(f"  │  BASELINE BEST TEST ACC: {best_acc:6.2f}%  │")
+    print(f"  └──────────────────────────────────────────────────┘\n")
     evaluate_test(model, "baseline")
 
 
@@ -142,10 +154,10 @@ def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
     milestones = [int(epochs * 0.6), int(epochs * 0.8)]
     scheduler  = torch.optim.lr_scheduler.MultiStepLR(opt, milestones, gamma=0.1)
     nll        = nn.NLLLoss()
-    print(f"  lr={lr}  |  Warmup={HAS_WARMUP_EPOCHS} epochs  |  "
-          f"BETA={BETA}  scale={has_scale}  margin={has_margin}")
+    print(f"  lr={lr}  |  Warmup={HAS_WARMUP_EPOCHS} epochs  | BETA={BETA}  scale={has_scale}  margin={has_margin}")
     print(f"  LR drops at epochs {milestones}\n")
-
+    best_acc = 0.0
+    best_state = None
     for ep in range(1, epochs + 1):
         model.train()
         tot_nll = tot_pen = correct = total = 0
@@ -167,6 +179,10 @@ def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
             total   += len(labels)
 
         scheduler.step()
+        acc = evaluate_test(model, "baseline")
+        if acc is not None and acc > best_acc:
+            best_acc = acc
+            best_state = model.state_dict()
 
         # w_cos: mean pairwise cosine between class weight vectors.
         # Printed every 10 epochs and during warmup.
@@ -186,8 +202,14 @@ def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
               f"lr={scheduler.get_last_lr()[0]:.1e}{extra}{wu}")
 
     path = weight_dir / "has_model.pth"
-    torch.save(model.state_dict(), path)
+    if best_state is not None:
+        torch.save(best_state, path)
+    else:
+        torch.save(model.state_dict(), path)
     print(f"\n  ✓ Saved → {path}")
+    print(f"\n  ┌──────────────────────────────────────────────────┐")
+    print(f"  │  HAS BEST TEST ACC:      {best_acc:6.2f}%  │")
+    print(f"  └──────────────────────────────────────────────────┘\n")
     evaluate_test(model, "has")
 
 
