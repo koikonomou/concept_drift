@@ -80,7 +80,7 @@ def evaluate_test(model, model_type="baseline"):
 # Training — Baseline
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_baseline(epochs, lr):
+def train_baseline(epochs, lr, weight_dir):
     print("\n" + "=" * 62)
     print("TRAINING BASELINE MODEL (ResNet50 + CrossEntropy)")
     print("=" * 62)
@@ -127,7 +127,7 @@ def train_baseline(epochs, lr):
 # Training — HAS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_has(epochs, lr):
+def train_has(epochs, lr, weight_dir):
     print("\n" + "=" * 62)
     print("TRAINING HAS MODEL (ResNet50 + HASeparator)")
     print("=" * 62)
@@ -209,9 +209,9 @@ def main():
     print(f"Device: {DEVICE}\n")
 
     if args.only != "has":
-        train_baseline(args.epochs, args.lr)
+        train_baseline(args.epochs, args.lr, weight_dir)
     if args.only != "baseline":
-        train_has(args.epochs, args.has_lr)
+        train_has(args.epochs, args.has_lr, weight_dir)
 
     print("train.py complete.")
 
