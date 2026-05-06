@@ -118,7 +118,7 @@ def train_baseline(epochs, lr, weight_dir):
               f"Train-Acc {100*correct/total:.1f}% | "
               f"lr={scheduler.get_last_lr()[0]:.1e}")
 
-    weight_dir / "baseline.pth"
+    path = weight_dir / "baseline.pth"
     print(f"\n  ✓ Saved → {path}")
     evaluate_test(model, "baseline")
 
@@ -127,7 +127,7 @@ def train_baseline(epochs, lr, weight_dir):
 # Training — HAS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_has(epochs, lr, weight_dir):
+def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
     print("\n" + "=" * 62)
     print("TRAINING HAS MODEL (ResNet50 + HASeparator)")
     print("=" * 62)
@@ -136,13 +136,13 @@ def train_has(epochs, lr, weight_dir):
     loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     print(f"  Train: {len(dataset)} samples  |  Classes: {dataset.classes}")
 
-    model     = HASModel(n_classes=len(dataset.classes), margin=args.has_margin, scale=args.has_scale).to(DEVICE)
+    model     = HASModel(n_classes=len(dataset.classes), margin=has_margin, scale=has_scale).to(DEVICE)
     opt       = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, nesterov=True, weight_decay=1e-4)
     milestones = [int(epochs * 0.6), int(epochs * 0.8)]
     scheduler  = torch.optim.lr_scheduler.MultiStepLR(opt, milestones, gamma=0.1)
     nll        = nn.NLLLoss()
     print(f"  lr={lr}  |  Warmup={HAS_WARMUP_EPOCHS} epochs  |  "
-          f"BETA={BETA}  scale={HAS_SCALE}  margin={HAS_MARGIN}")
+          f"BETA={BETA}  scale={has_scale}  margin={has_margin}")
     print(f"  LR drops at epochs {milestones}\n")
 
     for ep in range(1, epochs + 1):
@@ -184,7 +184,7 @@ def train_has(epochs, lr, weight_dir):
               f"Train-Acc {100*correct/total:.1f}% | "
               f"lr={scheduler.get_last_lr()[0]:.1e}{extra}{wu}")
 
-    weight_dir / "has_model.pth"
+    path = weight_dir / "has_model.pth"
     print(f"\n  ✓ Saved → {path}")
     evaluate_test(model, "has")
 
@@ -211,7 +211,7 @@ def main():
     if args.only != "has":
         train_baseline(args.epochs, args.lr, weight_dir)
     if args.only != "baseline":
-        train_has(args.epochs, args.has_lr, weight_dir)
+        train_has(args.epochs, args.has_lr, weight_dir, args.has_scale, args.has_margin)
 
     print("train.py complete.")
 
