@@ -124,7 +124,7 @@ class FolderDataset(Dataset):
             if count == 0:
                 print(f"'{folder}' folder exists but contains 0 images")
 
-        print(f"FolderDataset: {len(self.samples)} images, "f"{len(self.class_names)} classes {self.class_names}")
+        #print(f"FolderDataset: {len(self.samples)} images, "f"{len(self.class_names)} classes {self.class_names}")
 
     def __len__(self):
         return len(self.samples)
