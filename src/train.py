@@ -119,6 +119,7 @@ def train_baseline(epochs, lr, weight_dir):
               f"lr={scheduler.get_last_lr()[0]:.1e}")
 
     path = weight_dir / "baseline.pth"
+    torch.save(model.state_dict(), path)
     print(f"\n  ✓ Saved → {path}")
     evaluate_test(model, "baseline")
 
@@ -185,6 +186,7 @@ def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
               f"lr={scheduler.get_last_lr()[0]:.1e}{extra}{wu}")
 
     path = weight_dir / "has_model.pth"
+    torch.save(model.state_dict(), path)
     print(f"\n  ✓ Saved → {path}")
     evaluate_test(model, "has")
 
