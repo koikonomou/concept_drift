@@ -2,6 +2,7 @@ import os, sys, json, argparse
 import numpy as np
 import pandas as pd
 import warnings
+from pathlib import Path
 from config import (WEIGHT_DIR, FEATURE_DIR, RESULT_DIR,
                     DRIFT_SIGMA, HAS_MARGIN_SIGMA, LANDSCAPE_CLASSES,
                     CUSTOM_CLASS_MAP, ensure_dirs, resolve_custom_root)
@@ -12,17 +13,15 @@ from drift_stats import (
 )
 from models import FolderDataset, STANDARD_TRANSFORM
 
-
-def load_features(name):
-    path = os.path.join(FEATURE_DIR, f"{name}.npz")
+def load_features(name, feature_dir):
+    path = feature_dir / f"{name}.npz"
     if not os.path.exists(path):
         sys.exit(f"ERROR: {path} not found. Run extract.py first.")
     d = np.load(path, allow_pickle=True)
     return {k: d[k] for k in d.files}
 
-
-def load_train_stats(tag):
-    path = os.path.join(WEIGHT_DIR, f"{tag}_train_stats.npz")
+def load_train_stats(tag, weight_dir):
+    path = weight_dir / f"{tag}_train_stats.npz"
     if not os.path.exists(path):
         sys.exit(f"ERROR: {path} not found. Run extract.py first.")
     s = np.load(path)
@@ -172,8 +171,8 @@ def _build_key_dicts(custom_data, class_names):
     return ({k: np.array(v) for k, v in lat.items()},
             {k: np.array(v) for k, v in conf.items()})
 
-def save_csv(df, name, description=""):
-    path = os.path.join(RESULT_DIR, name)
+def save_csv(df, name, result_dir, description=""):
+    path = result_dir / name
     df.to_csv(path, index=False)
     print(f"  ✓ {name}  ({len(df)} rows{', ' + description if description else ''})")
     return path
@@ -183,17 +182,29 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--drift-sigma", type=float, default=DRIFT_SIGMA)
     parser.add_argument("--mmd-perms",   type=int,   default=300)
+    parser.add_argument("--feature-dir", default=FEATURE_DIR)
+    parser.add_argument("--weight-dir", default=WEIGHT_DIR)
+    parser.add_argument("--result-dir", default=RESULT_DIR)
+    
     args = parser.parse_args()
     ensure_dirs()
 
+    feature_dir = Path(args.feature_dir)
+    weight_dir = Path(args.weight_dir)
+    result_dir = Path(args.result_dir)
+
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    weight_dir.mkdir(parents=True, exist_ok=True)
+    result_dir.mkdir(parents=True, exist_ok=True)
+    
     print("Loading features …")
-    bl_train  = load_features("bl_train")
-    bl_custom = load_features("bl_custom")
-    ht        = load_features("has_train")
-    hc        = load_features("has_custom")
-    bl_stats  = load_train_stats("baseline")
-    has_stats = load_train_stats("has")
-    with open(os.path.join(FEATURE_DIR, "meta.json")) as f:
+    bl_train  = load_features("bl_train", feature_dir)
+    bl_custom = load_features("bl_custom", feature_dir)
+    ht        = load_features("has_train", feature_dir)
+    hc        = load_features("has_custom", feature_dir)
+    bl_stats  = load_train_stats("baseline", weight_dir)
+    has_stats = load_train_stats("has", weight_dir)
+    with open(feature_dir / "meta.json") as f:    
         meta = json.load(f)
     n_custom = len(bl_custom["latents"])
     print(f"  Train: {len(bl_train['latents'])} | Custom: {n_custom}")
@@ -234,8 +245,8 @@ def main():
     print(f"\n  HAS margin: train μ={has_mar['train_margin_mean']:.4f}  "
           f"custom μ={has_mar['custom_margin_mean']:.4f}  drop={has_mar['margin_drop']:.4f}")
     print(f"  Dominant drift direction: {has_dir['dominant_drift_direction']}")
-    save_csv(pd.DataFrame(rows_t1), "population_tests.csv")
-
+    save_csv(pd.DataFrame(rows_t1), "population_tests.csv", result_dir)
+    
     # Per-image DataFrames
     df_bl, bl_dth, bl_cth = build_baseline_df(
         bl_custom, bl_stats, LANDSCAPE_CLASSES, args.drift_sigma, custom_paths)
@@ -252,8 +263,8 @@ def main():
         print(f"    HAS      — data > {has_dth:.4f}  |  "
               f"margin < {mth:.4f} (μ={tmean:.4f}, σ={tstd:.4f})")
     print(f"    HAS margin-drifted: {df_has['has_margin_drifted'].mean()*100:.1f}%")
-    save_csv(df_bl,  "drift_baseline.csv", "per-image Baseline")
-    save_csv(df_has, "drift_has.csv",      "per-image HAS")
+    save_csv(df_bl, "drift_baseline.csv", result_dir, "per-image Baseline")
+    save_csv(df_bl, "drift_has.csv", result_dir, "per-image HAS")
 
     # TABLE 2
     _sep(); print("TABLE 2 — DRIFT TAXONOMY COMPARISON"); _sep()
@@ -281,8 +292,8 @@ def main():
         hidden = (df_has.loc[mask, "drift_type"] == "In-Distribution").sum()
         if hidden > 0:
             print(f"  ► {hidden} images ({hidden/n_custom*100:.1f}%): {label}")
-    save_csv(pd.DataFrame(rows_t2), "taxonomy_comparison.csv")
-
+    save_csv(pd.DataFrame(rows_t2), "taxonomy_comparison.csv", result_dir)
+    
     # TABLE 3
     _sep(); print("TABLE 3 — CONCEPT DRIFT DIRECTION (HAS)"); _sep()
     print("  Rows = true class  |  Columns = predicted drift destination")
@@ -317,8 +328,8 @@ def main():
             n = int((concept_df["true_class"] == true_cls).sum())
             print(f"    {true_cls:<12} → {dom:<12} ({row[dom]:.1f}% of {n} drifted samples)")
         print()
-    save_csv(pd.DataFrame(direction_rows), "concept_drift_direction.csv")
-
+    save_csv(pd.DataFrame(direction_row), "concept_drift_direction.csv", result_dir)
+    
     # TABLE 4
     _sep(); print("TABLE 4 — HAS DRIFT DIRECTION MATRICES"); _sep()
     dir_train,  _ = has_drift_direction_matrix(ht["labels"], ht["closest_boundary"], LANDSCAPE_CLASSES)
@@ -350,7 +361,7 @@ def main():
                       if dir_custom_drifted is not None else []):
         df_mat = pd.DataFrame(mat, index=LANDSCAPE_CLASSES, columns=LANDSCAPE_CLASSES)
         df_mat.index.name = "true_class"
-        save_csv(df_mat.reset_index(), name)
+        save_csv(df_mat.reset_index(), name, result_dir)
 
     # TABLE 5
     _sep(); print("TABLE 5 — HIERARCHICAL DRIFT ANALYSIS"); _sep()
@@ -385,8 +396,8 @@ def main():
     if only_has: print(f"  HAS-only flags      : {sorted(only_has)}")
     if not only_bl and not only_has: print(f"  Both models agree: {sorted(bl_d)}")
     df_hier = pd.DataFrame(hier_csv_rows)
-    save_csv(df_hier[df_hier["model"]=="Baseline"].drop("model",axis=1),"hierarchical_baseline.csv")
-    save_csv(df_hier[df_hier["model"]=="HAS"].drop("model",axis=1),"hierarchical_has.csv")
+    save_csv(df_hier[df_hier["model"]=="Baseline"].drop("model",axis=1),"hierarchical_baseline.csv", result_dir)
+    save_csv(df_hier[df_hier["model"]=="HAS"].drop("model",axis=1),"hierarchical_has.csv", result_dir)
     print("\ndetect.py complete.")
 
 if __name__ == "__main__":

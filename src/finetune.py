@@ -1,43 +1,23 @@
 """
-finetune.py — Two-pool fine-tuning experiment.
-
 Scientific questions:
-  Pool A: Does fine-tuning on DATA DRIFT change concept drift? (it shouldn't)
+  Pool A: Does fine-tuning on DATA DRIFT change concept drift? 
   Pool B: Does fine-tuning on CONCEPT DRIFT improve margins and accuracy?
 
 POOL A
   Train  : Pure Data Drift, ranked by data_drift_score descending
   Eval   : ALL Concept Drifted (Pure Concept Drift + Full Drift = 672 images)
            Always held out — Pool A never trains on concept drift samples.
-  Claim  : Near-zero concept drift change → two types are orthogonal
 
 POOL B
   Train  : Concept Drifted (Pure Concept + Full Drift), ranked by has_margin ascending
   Eval   : Held-out Concept Drifted samples not used for fine-tuning
            At 100%, no held-out exists → reported as diagnostic
-  Claim  : Margin recovers, concept errors decrease
 
 Both pools also report:
   - Source landscape test accuracy (catastrophic forgetting check)
   - Stable custom accuracy (In-Distribution + Pure Data Drift)
   - Full custom margin before/after (HAS objective recovery)
 
-KEY DESIGN (from working approach):
-  - model.eval() then only trainable modules .train()
-    → BatchNorm always uses running statistics (small-batch fix)
-  - Scope: embedder.fc + has_layer (not full backbone, not head-only)
-  - AdamW + gradient clipping
-  - Full HAS loss: ALPHA * NLL + ft_beta * HAS_penalty
-  - ft_beta=2.0 (stronger margin enforcement during fine-tuning)
-
-Usage:
-  python src/finetune.py
-  python src/finetune.py --pool data
-  python src/finetune.py --pool concept
-  python src/finetune.py --ft-pcts 25,50,100 --ft-epochs 50
-  python src/finetune.py --ft-scope head  (head only, if preferred)
-
-  nohup python src/finetune.py > logs/finetune.log 2>&1 &
 """
 
 import argparse, json, os
@@ -551,43 +531,31 @@ def main():
         description="Two-pool HAS fine-tuning experiment.")
 
     # Paths
-    parser.add_argument("--weight-dir",  default=None,
-                        help="Override weights directory")
-    parser.add_argument("--result-dir",  default=None,
-                        help="Override results directory")
-    parser.add_argument("--output-dir",  default=None,
-                        help="Output directory for CSV and checkpoints")
-    parser.add_argument("--input-csv",   default=None,
-                        help="Path to drift_has.csv (default: results/drift_has.csv)")
-    parser.add_argument("--has-weights", default=None,
-                        help="Path to has_model.pth (auto-detected if not given)")
-    parser.add_argument("--test-root",   default=TEST_ROOT,
-                        help="Source test set root for catastrophic forgetting check")
+    parser.add_argument("--weight-dir",  default=None, help="Override weights directory")
+    parser.add_argument("--result-dir",  default=None, help="Override results directory")
+    parser.add_argument("--output-dir",  default=None, help="Output directory for CSV and checkpoints")
+    parser.add_argument("--input-csv",   default=None, help="Path to drift_has.csv (default: results/drift_has.csv)")
+    parser.add_argument("--has-weights", default=None, help="Path to has_model.pth (auto-detected if not given)")
+    parser.add_argument("--test-root",   default=TEST_ROOT, help="Source test set root for catastrophic forgetting check")
 
     # Experiment
-    parser.add_argument("--pool",        choices=["data", "concept", "both"],
-                        default="both")
-    parser.add_argument("--ft-pcts",     default="25,50,100",
-                        help="Comma-separated %% of each pool to use")
+    parser.add_argument("--pool", choices=["data", "concept", "both"], default="both")
+    parser.add_argument("--ft-pcts", default="25,50,100", help="Comma-separated %% of each pool to use")
 
     # Fine-tuning
-    parser.add_argument("--ft-scope",    choices=["head", "embedder-fc-head"],
-                        default="embedder-fc-head",
+    parser.add_argument("--ft-scope",choices=["head", "embedder-fc-head"], default="embedder-fc-head",
                         help="Which parameters to train: "
                              "head=has_layer only, "
                              "embedder-fc-head=embedder.fc+has_layer")
     parser.add_argument("--ft-lr",       type=float, default=5e-5)
-    parser.add_argument("--ft-beta",     type=float, default=2.0,
-                        help="HAS penalty weight during fine-tuning (default 2.0)")
+    parser.add_argument("--ft-beta",     type=float, default=2.0, help="HAS penalty weight during fine-tuning (default 2.0)")
     parser.add_argument("--ft-epochs",   type=int,   default=50)
     parser.add_argument("--batch-size",  type=int,   default=BATCH_SIZE)
     parser.add_argument("--dropout",     type=float, default=0.1)
     parser.add_argument("--weight-decay",type=float, default=1e-4)
     parser.add_argument("--grad-clip",   type=float, default=5.0)
-    parser.add_argument("--augment",     action="store_true",
-                        help="Use training augmentation (default: eval transform)")
-    parser.add_argument("--log-every",   type=int,   default=10,
-                        help="Print training log every N epochs")
+    parser.add_argument("--augment",     action="store_true", help="Use training augmentation (default: eval transform)")
+    parser.add_argument("--log-every",   type=int,   default=10, help="Print training log every N epochs")
     parser.add_argument("--seed",        type=int,   default=RANDOM_SEED)
 
     args = parser.parse_args()

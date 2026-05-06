@@ -1,18 +1,5 @@
 """
 Extract 64-D latents + predictions from both models.
-
-Loads weights from step1, runs inference on train and custom datasets,
-saves everything as .npz files so later steps don't need GPU.
-
-Usage:
-    python step2_extract.py
-
-Outputs:
-    features/bl_train.npz     baseline train features
-    features/bl_custom.npz    baseline custom features
-    features/has_train.npz    HAS train features  (+ margins, closest_boundary)
-    features/has_custom.npz   HAS custom features (+ margins, closest_boundary)
-    features/meta.npz         class names + dataset sizes
 """
 
 import os
@@ -21,7 +8,8 @@ import json
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-
+import argparse 
+from pathlib import Path
 
 from config import (TRAIN_ROOT, WEIGHT_DIR, FEATURE_DIR, DEVICE,
                     LANDSCAPE_CLASSES, CUSTOM_CLASS_MAP,
@@ -115,11 +103,11 @@ def save_features(data: dict, path: str):
     print(f"  ✓ {n} samples → {path}")
 
 
-def save_train_stats(latents, confs, tag):
+def save_train_stats(latents, confs, tag, weight_dir):
     """Centroid + distance + confidence stats for drift thresholding."""
     centroid = latents.mean(axis=0)
     dists = np.linalg.norm(latents - centroid, axis=1)
-    path = os.path.join(WEIGHT_DIR, f"{tag}_train_stats.npz")
+    path = weight_dir / f"{tag}_train_stats.npz"
     np.savez(path, centroid=centroid,
              dist_mean=dists.mean(), dist_std=dists.std(),
              conf_mean=confs.mean(), conf_std=confs.std())
@@ -127,7 +115,7 @@ def save_train_stats(latents, confs, tag):
     print(f"    Latent distance: μ={dists.mean():.4f}, σ={dists.std():.4f}")
     print(f"    Confidence:      μ={confs.mean():.4f}, σ={confs.std():.4f}")
 
-def save_train_stats_has(latents, confs, margins, labels, tag):
+def save_train_stats_has(latents, confs, margins, labels, tag, weight_dir):
 # ── Overall centroid (kept for reference / Baseline compatibility) ──────
     centroid = latents.mean(axis=0)
     dists    = np.linalg.norm(latents - centroid, axis=1)
@@ -161,8 +149,8 @@ def save_train_stats_has(latents, confs, margins, labels, tag):
         cos_dists = 1.0 - cos_sims                       # (n_c,)
         class_cos_dist_mean[c] = cos_dists.mean()
         class_cos_dist_std[c]  = cos_dists.std()
-
-    path = os.path.join(WEIGHT_DIR, f"{tag}_train_stats.npz")
+    
+    path = weight_dir / f"{tag}_train_stats.npz"
     np.savez(path,
              centroid=centroid,
              dist_mean=dists.mean(),    dist_std=dists.std(),
@@ -186,20 +174,31 @@ def save_train_stats_has(latents, confs, margins, labels, tag):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--feature-dir", default=FEATURE_DIR)
+    parser.add_argument("--weight-dir", default=WEIGHT_DIR)
+    args = parser.parse_args()
+
+    feature_dir = Path(args.feature_dir)
+    weight_dir = Path(args.weight_dir)
+
     ensure_dirs()
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    weight_dir.mkdir(parents=True, exist_ok=True)
     custom_root = resolve_custom_root()
     print(f"Train data : {TRAIN_ROOT}")
     print(f"Custom data: {custom_root}")
     print(f"Device     : {DEVICE}\n")
 
     # ── Load models ──
-    bl_path  = os.path.join(WEIGHT_DIR, "baseline.pth")
-    has_path = os.path.join(WEIGHT_DIR, "has_model.pth")
+    bl_path  = weight_dir / "baseline.pth"
+    has_path = weight_dir / "has_model.pth"
     for p in [bl_path, has_path]:
         if not os.path.exists(p):
-            sys.exit(f"ERROR: weights not found at {p}\n"
-                     f"  Run step1_train.py first.")
+            sys.exit(f"ERROR: weights not found at {p}")
 
+
+     
     baseline = BaselineModel().to(DEVICE)
     baseline.load_state_dict(torch.load(bl_path, map_location=DEVICE))
 
@@ -216,13 +215,11 @@ def main():
     bl_train  = extract_baseline(baseline, train_loader)
     has_train = extract_has(has_model, train_loader)
 
-    save_features(bl_train,  os.path.join(FEATURE_DIR, "bl_train.npz"))
-    save_features(has_train, os.path.join(FEATURE_DIR, "has_train.npz"))
-    save_train_stats(bl_train["latents"],  bl_train["confs"],  "baseline")
-    # ADDITION 1 — use extended stats saver for HAS (includes margin_mean/std)
+    save_features(bl_train,  feature_dir / "bl_train.npz")
+    save_features(has_train, feature_dir / "has_train.npz")
+    save_train_stats(bl_train["latents"], bl_train["confs"], "baseline", weight_dir)
     save_train_stats_has(has_train["latents"], has_train["confs"],
-                         has_train["margins"],  has_train["labels"], "has")
-
+                     has_train["margins"], has_train["labels"], "has", weight_dir)
     # ── Custom data (only the 5 classes that map to training classes) ──
     print("\nExtracting custom features …")
     print(f"  Using class map: {CUSTOM_CLASS_MAP}")
@@ -242,11 +239,10 @@ def main():
     bl_custom  = extract_baseline(baseline, custom_loader)
     has_custom = extract_has(has_model, custom_loader)
 
-    save_features(bl_custom,  os.path.join(FEATURE_DIR, "bl_custom.npz"))
-    save_features(has_custom, os.path.join(FEATURE_DIR, "has_custom.npz"))
-
+    save_features(bl_custom,  feature_dir / "bl_custom.npz")
+    save_features(has_custom, feature_dir / "has_custom.npz")
     # ── Save metadata ──
-    meta_path = os.path.join(FEATURE_DIR, "meta.json")
+    meta_path = feature_dir / "meta.json"
     meta = dict(
         train_classes=LANDSCAPE_CLASSES,
         custom_classes=custom_ds.class_names,
