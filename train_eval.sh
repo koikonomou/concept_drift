@@ -28,11 +28,11 @@ run_experiment() {
     echo "════════════════════════════════════════════════════════"
 
     if $DRY_RUN; then
-        echo "  [dry-run] python src/run_experiment.py --tag $TAG $SKIP_FLAG $EXTRA_ARGS"
+        echo "  [dry-run] poetry run python src/run_experiment.py --tag $TAG $SKIP_FLAG $EXTRA_ARGS"
         return
     fi
 
-    python src/run_experiment.py \
+    poetry run python src/run_experiment.py \
         --tag "$TAG" \
         $SKIP_FLAG \
         $EXTRA_ARGS
@@ -96,7 +96,7 @@ echo "  AGGREGATING all runs → runs/all_runs_summary.csv"
 echo "════════════════════════════════════════════════════════"
 
 if ! $DRY_RUN; then
-    python src/run_experiment.py --aggregate
+    poetry run python src/run_experiment.py --aggregate
 fi
 
 END_TIME=$(date +"%Y-%m-%d %H:%M:%S")
