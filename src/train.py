@@ -70,9 +70,7 @@ def evaluate_test(model, model_type="baseline"):
         total   += len(labels)
 
     acc = 100.0 * correct / total if total > 0 else 0.0
-    print(f"\n  ┌──────────────────────────────────────────────────┐")
     print(f"  │  {model_type.upper():<32} TEST ACC: {acc:6.2f}%  │")
-    print(f"  └──────────────────────────────────────────────────┘\n")
     return acc
 
 
@@ -130,9 +128,7 @@ def train_baseline(epochs, lr, weight_dir):
     else:
         torch.save(model.state_dict(), path)
     print(f"\n  ✓ Saved → {path}")
-    print(f"\n  ┌──────────────────────────────────────────────────┐")
     print(f"  │  BASELINE BEST TEST ACC: {best_acc:6.2f}%  │")
-    print(f"  └──────────────────────────────────────────────────┘\n")
     evaluate_test(model, "baseline")
 
 
@@ -207,9 +203,7 @@ def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
     else:
         torch.save(model.state_dict(), path)
     print(f"\n  ✓ Saved → {path}")
-    print(f"\n  ┌──────────────────────────────────────────────────┐")
     print(f"  │  HAS BEST TEST ACC:      {best_acc:6.2f}%  │")
-    print(f"  └──────────────────────────────────────────────────┘\n")
     evaluate_test(model, "has")
 
 
