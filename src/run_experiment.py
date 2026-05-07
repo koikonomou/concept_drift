@@ -353,11 +353,9 @@ def main():
     if args.only in (None, "extract") and not args.skip_extract:
         ok = run_step(
             "Extract features",
-            f"{PYTHON} src/extract.py "
+            (f"{PYTHON} src/extract.py "
             f"--weight-dir {wd} "
-            f"--feature-dir {fd}",
-            f"--has-scale {args.has_scale} ",
-            f"--has-margin {args.has_margin}",
+            f"--feature-dir {fd}"),
             log_path, args.dry_run)
         if not ok:
             sys.exit(1)
