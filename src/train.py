@@ -114,12 +114,13 @@ def train_baseline(epochs, lr, weight_dir):
         acc = evaluate_test(model, "baseline")
         if acc is not None and acc > best_acc:
             best_acc = acc
-            best_state = model.state_dict()
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         # Train-Acc = accuracy on training data with augmentation.
         # Measures fitting, NOT generalisation. See TEST ACC below.
         print(f"  Epoch {ep:3d}/{epochs} | "
               f"Loss {tot_loss/len(loader):.4f} | "
               f"Train-Acc {100*correct/total:.1f}% | "
+              f"Best Test-Acc {best_acc:6.2f}% | "
               f"lr={scheduler.get_last_lr()[0]:.1e}")
 
     path = weight_dir / "baseline.pth"
@@ -128,8 +129,8 @@ def train_baseline(epochs, lr, weight_dir):
     else:
         torch.save(model.state_dict(), path)
     print(f"\n  ✓ Saved → {path}")
-    print(f"  │  BASELINE BEST TEST ACC: {best_acc:6.2f}%  │")
-    evaluate_test(model, "baseline")
+    #print(f"  │  BASELINE BEST TEST ACC: {best_acc:6.2f}%  │")
+    #evaluate_test(model, "baseline")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,8 +179,7 @@ def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
         acc = evaluate_test(model, "has")
         if acc is not None and acc > best_acc:
             best_acc = acc
-            best_state = model.state_dict()
-
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         # w_cos: mean pairwise cosine between class weight vectors.
         # Printed every 10 epochs and during warmup.
         extra = ""
@@ -195,6 +195,7 @@ def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
               f"NLL {tot_nll/len(loader):.4f} | "
               f"Pen {tot_pen/len(loader):.4f} | "
               f"Train-Acc {100*correct/total:.1f}% | "
+              f"Best Test-Acc {best_acc:6.2f}% | "
               f"lr={scheduler.get_last_lr()[0]:.1e}{extra}{wu}")
 
     path = weight_dir / "has_model.pth"
@@ -203,8 +204,8 @@ def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
     else:
         torch.save(model.state_dict(), path)
     print(f"\n  ✓ Saved → {path}")
-    print(f"  │  HAS BEST TEST ACC:      {best_acc:6.2f}%  │")
-    evaluate_test(model, "has")
+    #print(f"  │  HAS BEST TEST ACC:      {best_acc:6.2f}%  │")
+    #evaluate_test(model, "has")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
