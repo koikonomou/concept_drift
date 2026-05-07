@@ -175,7 +175,7 @@ def train_has(epochs, lr, weight_dir,  has_scale, has_margin):
             total   += len(labels)
 
         scheduler.step()
-        acc = evaluate_test(model, "baseline")
+        acc = evaluate_test(model, "has")
         if acc is not None and acc > best_acc:
             best_acc = acc
             best_state = model.state_dict()
