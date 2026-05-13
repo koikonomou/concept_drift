@@ -297,6 +297,36 @@ def main():
     print(f"    HAS margin-drifted: {df_has['has_margin_drifted'].mean()*100:.1f}%")
     save_csv(df_bl, "drift_baseline.csv", result_dir, "per-image Baseline")
     save_csv(df_has, "drift_has.csv", result_dir, "per-image HAS")
+    
+    # Define the selection sizes
+    N_list = [50, 150]
+
+    for N in N_list:
+        print(f"\n--- Analysis for Top {N} Most Severe Drift Samples ---")
+        
+        # 1. Select top N from Baseline (Highest Concept Drift Score / Lowest Confidence)
+        top_bl = df_bl.sort_values("concept_drift_score", ascending=False).head(N)
+        bl_paths = set(top_bl["file_path"])
+        save_csv(top_bl, f"top_{N}_severity_baseline.csv", result_dir)
+
+        # 2. Select top N from HAS (Smallest Margin = Closest to Decision Boundary)
+        # Note: We use 'has_margin' because it's the most sensitive metric in HAS
+        top_has = df_has.sort_values("has_margin", ascending=True).head(N)
+        has_paths = set(top_has["file_path"])
+        save_csv(top_has, f"top_{N}_severity_has.csv", result_dir)
+
+        # 3. Find the overlap (Common instances)
+        common_paths = bl_paths.intersection(has_paths)
+        overlap_pct = (len(common_paths) / N) * 100
+
+        print(f"  Selection Size: {N}")
+        print(f"  Overlap: {len(common_paths)} images match ({overlap_pct:.1f}%)")
+        print(f"  Unique to HAS: {N - len(common_paths)} images")
+        
+        # 4. Save a report of the HAS-exclusive selections 
+        # These are the images HAS wants to train on that Baseline would have ignored
+        exclusive_has = top_has[~top_has["file_path"].isin(bl_paths)]
+        save_csv(exclusive_has, f"top_{N}_exclusive_to_HAS_selection.csv", result_dir)
 
     # TABLE 2
     _sep(); print("TABLE 2 — DRIFT TAXONOMY COMPARISON"); _sep()
