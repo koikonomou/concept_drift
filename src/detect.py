@@ -254,6 +254,38 @@ def main():
         hc, has_stats, LANDSCAPE_CLASSES, args.drift_sigma, HAS_MARGIN_SIGMA,
         custom_paths)
 
+    
+    # 1. Map labels to names for readability
+    def get_class_name(idx):
+        return LANDSCAPE_CLASSES[idx] if idx < len(LANDSCAPE_CLASSES) else str(idx)
+
+    df_bl["predicted_class"] = df_bl["pred_label"].apply(get_class_name)
+    df_has["predicted_class"] = df_has["pred_label"].apply(get_class_name)
+
+    # 2. Save categorized instances for Baseline
+    # This groups the custom data by what the Baseline model thinks they are
+    bl_export = df_bl[["predicted_class", "file_path", "drift_type", "max_confidence"]]
+    save_csv(bl_export.sort_values("predicted_class"), "instances_by_class_baseline.csv", result_dir)
+
+    # 3. Save categorized instances for HAS
+    # This groups by HAS predictions and includes the margin-based drift type
+    has_export = df_has[["predicted_class", "file_path", "has_drift_type_margin", "has_margin"]]
+    save_csv(has_export.sort_values("predicted_class"), "instances_by_class_has.csv", result_dir)
+
+    # 4. Find images ONLY caught by HAS
+    # Logic: Baseline says "In-Distribution" AND HAS says "Drifted"
+    has_drifted_mask = df_has["has_drift_type_margin"] != "In-Distribution"
+    bl_safe_mask = df_bl["drift_type"] == "In-Distribution"
+    
+    exclusive_mask = has_drifted_mask & bl_safe_mask
+    df_exclusive = df_has[exclusive_mask].copy()
+
+    if not df_exclusive.empty:
+        print(f"\n  ⭐ Found {len(df_exclusive)} images caught ONLY by HAS model.")
+        save_csv(df_exclusive[["file_path", "predicted_class", "has_drift_type_margin", "has_margin"]], 
+                 "has_exclusive_drift.csv", result_dir)
+    else:
+        print("\n  No exclusive HAS drift found; both models agree on safe samples.")
     print(f"\n  Thresholds (σ={args.drift_sigma}):")
     print(f"    Baseline — data > {bl_dth:.4f}  |  conf < {bl_cth:.4f}")
     if has_dth is None:
