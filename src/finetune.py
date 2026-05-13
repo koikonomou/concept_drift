@@ -410,24 +410,27 @@ def fmt_pct(x):
 def fmt_num(x):
     return "—" if x is None else f"{x:.4f}"
 
-def run_condition(pool_name, pct, train_pool, concept_all, stable,
+def run_condition(pool_name, pct, fixed_n,  train_pool, concept_all, stable,
                   full_custom, args, has_weights, ckpt_dir):
     """Run one (pool, ft_pct) combination.
 
     Pool A: train on Pure Data Drift → evaluate on ALL concept drifted
             (orthogonality test: should show near-zero concept change)
-
+i
     Pool B: train on Concept Drifted → evaluate on held-out concept drifted
             (recovery test: margin should increase, errors should decrease)
     """
-    selected, heldout = split_pct(train_pool, pct)
-
+    
+    #selected, heldout = split_pct(train_pool, pct)
+    selected = train_pool[:fixed_n]
+    
     if pool_name == "A":
         concept_eval    = concept_all
         eval_protocol   = "heldout_cross_pool"
         train_subset    = "Pure Data Drift"
         ranked_by       = "data_drift_score descending"
     else:
+        heldout = train_pool[fixed_n:]
         concept_eval    = heldout if len(heldout) > 0 else selected
         eval_protocol   = ("heldout_concept" if len(heldout) > 0
                            else "concept_train_diagnostic_no_heldout")
@@ -589,18 +592,24 @@ def main():
 
     # ── Load taxonomy ─────────────────────────────────────────────────────────
     all_records = load_taxonomy(str(input_csv))
-
-    pool_a      = sort_pool_a(filter_records(all_records, ["Pure Data Drift"]))
-    pool_b      = sort_pool_b(filter_records(all_records,
+    
+    pool_a_full      = sort_pool_a(filter_records(all_records, ["Pure Data Drift"]))
+    pool_b_full      = sort_pool_b(filter_records(all_records,
                                               ["Pure Concept Drift", "Full Drift (both)"]))
+    pool_r_full = list(all_records) # "All Samples"
+    pool_a = sort_pool_a(pool_a_full)
+    pool_b = sort_pool_b(pool_b_full)
+    pool_r = list(pool_r_full)
+    import random
+    random.seed(args.seed)
+    random.shuffle(pool_r)
     concept_all = sort_pool_b(filter_records(all_records,
                                               ["Pure Concept Drift", "Full Drift (both)"]))
     stable      = filter_records(all_records, ["In-Distribution", "Pure Data Drift"])
     full_custom = list(all_records)
 
-    pcts = [float(x) / 100.0 if float(x) > 1 else float(x)
-            for x in args.ft_pcts.split(",")]
-
+    pcts = [float(x) / 100.0 if float(x) > 1 else float(x) for x in args.ft_pcts.split(",")]
+    
     # ── Summary ───────────────────────────────────────────────────────────────
     print("=" * 72)
     print("TWO-POOL FINE-TUNING EXPERIMENT")
@@ -630,7 +639,7 @@ def main():
         print("═" * 72)
         for pct in pcts:
             rows.append(run_condition(
-                pool_name="A", pct=pct,
+                pool_name="A", pct=pct, fixed_n = ref_n,
                 train_pool=pool_a, concept_all=concept_all,
                 stable=stable, full_custom=full_custom,
                 args=args, has_weights=has_weights, ckpt_dir=ckpt_dir))
@@ -642,7 +651,18 @@ def main():
         print("═" * 72)
         for pct in pcts:
             rows.append(run_condition(
-                pool_name="B", pct=pct,
+                pool_name="B", pct=pct, fixed_n = ref_n,
+                train_pool=pool_b, concept_all=concept_all,
+                stable=stable, full_custom=full_custom,
+                args=args, has_weights=has_weights, ckpt_dir=ckpt_dir))
+
+    if args.pool in {"all", "both"}:
+        print("\n" + "═" * 72)
+        print("POOL ALL")
+        print("═" * 72)
+        for pct in pcts:
+            rows.append(run_condition(
+                pool_name="R", pct=pct, fixed_n = ref_n,
                 train_pool=pool_b, concept_all=concept_all,
                 stable=stable, full_custom=full_custom,
                 args=args, has_weights=has_weights, ckpt_dir=ckpt_dir))

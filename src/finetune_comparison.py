@@ -1,5 +1,4 @@
 """
-finetune_comparison.py — Pro Developer Version
 Executes a controlled experiment comparing Global vs Targeted fine-tuning.
 Saves training history for plotting and comparative performance deltas.
 """
